@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Scan output (never commit target data)
+output/targets/*/
+
+# Embedded repos
+legacy_code/vulpimancer/
+
+# OS
+.DS_Store
+Thumbs.db
