@@ -459,7 +459,36 @@ class Session:
             "",
             "---",
             "",
-            "## 🎯 Target Summary",
+        ]
+
+        # ── Table of Contents ─────────────────────────────────────────
+        # Anchor format: GitHub-flavored Markdown (emoji stripped, lowercase,
+        # spaces → hyphens).  Works in Obsidian, Typora, and GitHub preview.
+        _privesc_anchor = (
+            "#windows-privesc-arsenal"
+            if self.info.os_type == "Windows"
+            else "#linux-privesc-arsenal"
+        )
+        lines += [
+            "## 📑 Quick Navigation",
+            "",
+            "| # | Section | Jump |",
+            "|---|---------|------|",
+            "| 1 | 🎯 Target Overview | [↓](#target-overview) |",
+            "| 2 | ⚠️ Vulnerabilities & Critical Findings | [↓](#vulnerabilities--critical-findings) |",
+            "| 3 | 📋 OSCP Manual Checklist | [↓](#oscp-manual-checklist) |",
+            "| 4 | 🛠️ Attacker Setup | [↓](#attacker-setup--download-binaries-to-kali) |",
+            "| 5 | 🐚 Post-Shell Survival Kit | [↓](#post-shell-survival-kit) |",
+            f"| 6 | 💥 PrivEsc Arsenal | [↓]({_privesc_anchor}) |",
+            "| 7 | 🕸️ Pivoting & Tunnelling | [↓](#pivoting--tunnelling-arsenal) |",
+            "",
+            "---",
+            "",
+        ]
+
+        # ── Target Overview (merged summary + services — no port duplication) ─
+        lines += [
+            "## 🎯 Target Overview",
             "",
             "| Field | Value |",
             "|-------|-------|",
@@ -467,15 +496,12 @@ class Session:
             f"| **Domain** | `{domain}` |",
             f"| **OS Guess** | {os_guess} |",
             f"| **Scan Date** | {date_str} |",
-            f"| **Open Ports** | {ports_str} |",
             "",
         ]
 
-        # ── Open Ports Table ──────────────────────────────────────────
+        # Services table immediately follows — this IS the port list
         if self.info.open_ports:
             lines += [
-                "## 🔍 Discovered Services",
-                "",
                 "| Port | Protocol | Service | Version |",
                 "|------|----------|---------|---------|",
             ]

