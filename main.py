@@ -21,10 +21,23 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --target 10.10.10.10
-  python main.py --target 10.10.10.10 --domain corp.local
-  python main.py --target 10.10.10.10 --modules smb web
+  # Standard exam run — full auto, pre-filled LHOST for Arsenal Recommender
+  python main.py --target 10.10.10.10 --lhost 10.10.14.5
+
+  # With a known AD domain
+  python main.py --target 10.10.10.10 --domain corp.local --lhost 10.10.14.5
+
+  # Resume after interruption (loads session.json, skips already-done modules)
+  python main.py --target 10.10.10.10 --resume --lhost 10.10.14.5
+
+  # Preview every command without executing (scope review / exam prep)
   python main.py --target 10.10.10.10 --dry-run
+
+  # Force specific modules only (skip discovery)
+  python main.py --target 10.10.10.10 --modules smb ldap web
+
+  # Custom output directory (e.g. OSCP exam folder)
+  python main.py --target 10.10.10.10 --output-dir /root/oscp/exam --lhost 10.10.14.5
         """,
     )
 
@@ -32,13 +45,35 @@ Examples:
         "--target", "-t",
         required=True,
         metavar="IP",
-        help="Target IP address",
+        help="Target IP address.",
     )
     parser.add_argument(
         "--domain", "-d",
         default="",
         metavar="DOMAIN",
-        help="Target domain / hostname (e.g. corp.local)",
+        help="Target domain / hostname (e.g. corp.local). Passed to LDAP, DNS, SMB, and web modules.",
+    )
+    parser.add_argument(
+        "--lhost",
+        default="",
+        metavar="IP",
+        help=(
+            "Your attacker/VPN IP address (e.g. tun0: 10.10.14.5). "
+            "Pre-fills all <LHOST> placeholders in the Arsenal Recommender section of notes.md "
+            "so transfer and reverse-shell commands are copy-paste ready. "
+            "Example: --lhost 10.10.14.5"
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a previous session from session.json. "
+            "Without this flag a fresh scan always starts, even if session.json exists. "
+            "With this flag, Nmap is skipped when ports are already known and only "
+            "pending modules are queued. "
+            "Example: python main.py --target 10.10.10.10 --resume"
+        ),
     )
     parser.add_argument(
         "--modules", "-m",
@@ -62,18 +97,18 @@ Examples:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print commands that would be executed without running them",
+        help="Print commands that would be executed without running them. Useful for scope review.",
     )
     parser.add_argument(
         "--output-dir",
         default="output/targets",
         metavar="DIR",
-        help="Base directory for scan output (default: output/targets)",
+        help="Base directory for scan output (default: output/targets).",
     )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Verbose output",
+        help="Verbose output — show DEBUG-level log messages.",
     )
 
     return parser.parse_args()
@@ -89,6 +124,8 @@ def main() -> None:
         dry_run=args.dry_run,
         verbose=args.verbose,
         forced_modules=args.modules,
+        lhost=args.lhost,
+        resume=args.resume,
     )
 
     try:

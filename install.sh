@@ -228,6 +228,9 @@ from core.session import Session, TargetInfo
 from core.engine import Engine
 from core.parser import NmapParser
 from core.recommender import Recommender
+from core.advisor import Advisor
+from core.arsenal_rules import ARSENAL_RULES
+from core.runner import run_wrapper
 import modules.network
 import modules.smb
 import modules.ftp

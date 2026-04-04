@@ -9,14 +9,13 @@ Port → protocol detection:
   Everything else → http (unless deep scan banner says ssl/https)
 """
 
-import os
 import re
-import signal
-import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from rich.console import Console
+
+from core.runner import run_wrapper
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -101,27 +100,15 @@ def run(target: str, session, dry_run: bool = False) -> None:
             cmd += ["--domain", session.info.domain]
 
         display = " ".join(str(c) for c in cmd)
-        log.info("[CMD] %s", display)
         console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
 
-        proc: Optional[subprocess.Popen] = None
         try:
+            run_wrapper(cmd, session, label=f"web_enum.sh port {port}", dry_run=dry_run)
             if not dry_run:
-                proc = subprocess.Popen(
-                    cmd,
-                    text=True,
-                    start_new_session=True,  # own process group for clean kill
-                )
-                proc.wait()
-                if proc.returncode not in (0, None):
-                    log.warning(
-                        "web_enum.sh port %d exited with code %d",
-                        port, proc.returncode,
-                    )
                 _parse_web_output(port, session, log)
 
         except KeyboardInterrupt:
-            _kill_proc_group(proc, log)
+            # run_wrapper already sent SIGTERM/SIGKILL to the process group
             console.print(
                 f"\n  [bold yellow][WARNING][/bold yellow] Skipping port "
                 f"[cyan]{port}[/cyan] by user request (Ctrl+C)... "
@@ -331,35 +318,3 @@ def _parse_cgi_sniper(web_dir: Path, suffix: str, session, log) -> None:
         )
 
 
-def _kill_proc_group(proc: Optional[subprocess.Popen], log) -> None:
-    """
-    Terminate a Popen process and its entire process group.
-
-    Because the wrapper is launched with start_new_session=True, the bash
-    script and every child it spawned (nmap, feroxbuster, gobuster …) share
-    one process group ID.  os.killpg() reaches all of them in one call,
-    preventing orphaned background processes from consuming RAM.
-
-    Falls back to proc.terminate() on Windows (no killpg) or if the process
-    group is gone by the time we try.
-    """
-    if proc is None or proc.poll() is not None:
-        return  # already exited — nothing to do
-
-    try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGTERM)
-        log.info("Sent SIGTERM to process group %d", pgid)
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        # Still running after 5 s — escalate to SIGKILL
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGKILL)
-            log.warning("Process group %d did not exit cleanly — SIGKILL sent", pgid)
-        except (ProcessLookupError, PermissionError):
-            pass  # process group already gone
-        proc.wait()
-    except (ProcessLookupError, PermissionError, AttributeError):
-        # Windows, or process already exited between poll() and getpgid()
-        proc.terminate()

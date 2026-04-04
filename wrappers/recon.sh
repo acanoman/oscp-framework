@@ -167,12 +167,16 @@ info "Step 4/4 — Deep Service + Script Scan (-sC -sV -O)"
 DEEP_BASE="${SCANS_DIR}/targeted"
 cmd "sudo nmap -p${PORTS} -sC -sV -O --script-timeout 30s -Pn $TARGET -oA $DEEP_BASE"
 sudo nmap -p"$PORTS" -sC -sV -O --script-timeout 30s -Pn "$TARGET" \
-    -oA "$DEEP_BASE" 2>&1 | tee "${DEEP_BASE}.nmap" || true
+    -oA "$DEEP_BASE" 2>&1 | tee "${DEEP_BASE}.nmap" || \
+    warn "Deep scan exited non-zero — partial results may still be available."
 
-# Symlink XML for the Python parser
+# Copy XML for the Python parser (guard: nmap may skip -O on hardened hosts)
 if [[ -f "${DEEP_BASE}.xml" ]]; then
-    cp "${DEEP_BASE}.xml" "${SCANS_DIR}/nmap_initial.xml"
+    cp "${DEEP_BASE}.xml" "${SCANS_DIR}/nmap_initial.xml" || \
+        warn "Could not copy ${DEEP_BASE}.xml — check permissions."
     ok "Deep scan XML → ${WHITE}${SCANS_DIR}/nmap_initial.xml${NC}"
+else
+    warn "No XML output produced by deep scan — OS detection may be unavailable."
 fi
 
 # NSE vuln scan — run in background (slow, ~15 min)

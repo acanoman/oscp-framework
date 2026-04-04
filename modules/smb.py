@@ -9,8 +9,9 @@ Credentials are pulled from session.info if they were stored there
 """
 
 import re
-import subprocess
 from pathlib import Path
+
+from core.runner import run_wrapper
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -56,7 +57,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
     else:
         log.info("Running null/guest SMB enum (no credentials in session)")
 
-    _exec(cmd, log, dry_run, label="smb_enum.sh")
+    run_wrapper(cmd, session, label="smb_enum.sh", dry_run=dry_run)
 
     if dry_run:
         return
@@ -185,6 +186,31 @@ def _parse_domain_info(smb_dir: Path, session, log) -> None:
                 session.info.is_domain_controller = True
                 log.info("Domain Controller confirmed via NXC output in %s", fname)
 
+        # -------------------------------------------------------------------
+        # OS version fallback: NXC reports the exact Windows build even when
+        # Nmap -O fails on hardened hosts.
+        # Example NXC line:
+        #   SMB  10.10.10.10  445  HOST  [*] Windows 10.0 Build 17763 x64 (name:…)
+        # Parse this and populate session.info.os_version if not already set.
+        # -------------------------------------------------------------------
+        if not session.info.os_version:
+            for line in content.splitlines():
+                # Match "Windows X.Y Build NNNNN" with optional arch suffix
+                m = re.search(
+                    r'\bWindows\s+([\d.]+\s+Build\s+\d+)',
+                    line,
+                    re.IGNORECASE,
+                )
+                if m:
+                    nxc_ver = m.group(1).strip()
+                    session.info.os_version = nxc_ver
+                    if not session.info.os_type:
+                        session.info.os_type = "Windows"
+                    log.info(
+                        "OS version from NXC SMB banner: Windows %s", nxc_ver
+                    )
+                    break
+
         if hostname or domain:
             break  # found what we need
 
@@ -218,23 +244,3 @@ def _parse_signing(smb_dir: Path, session, log) -> None:
             break
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _exec(cmd: list, log, dry_run: bool, label: str = "") -> int:
-    display = " ".join(str(c) for c in cmd)
-    prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
-    log.info("%s %s", prefix, display)
-
-    if dry_run:
-        return 0
-
-    try:
-        result = subprocess.run(cmd, text=True, check=False)
-        if result.returncode != 0:
-            log.warning("%s exited with code %d", label or cmd[0], result.returncode)
-        return result.returncode
-    except FileNotFoundError:
-        log.error("Command not found: %s", cmd[0])
-        return -1

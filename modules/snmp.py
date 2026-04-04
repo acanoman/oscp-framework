@@ -13,8 +13,9 @@ OSCP compliance:
 """
 
 import re
-import subprocess
 from pathlib import Path
+
+from core.runner import run_wrapper
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -62,7 +63,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
         "--udp-ports",  "161",       # triggers has_udp_port 161 in wrapper
     ]
 
-    _exec(cmd, log, dry_run, label="services_enum.sh (snmp)")
+    run_wrapper(cmd, session, label="services_enum.sh (snmp)", dry_run=dry_run)
 
     if dry_run:
         return
@@ -147,23 +148,3 @@ def _parse_snmp(session, log) -> None:
         log.info("SNMP potential process/user names: %s", users[:10])
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _exec(cmd: list, log, dry_run: bool, label: str = "") -> int:
-    display = " ".join(str(c) for c in cmd)
-    prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
-    log.info("%s %s", prefix, display)
-
-    if dry_run:
-        return 0
-
-    try:
-        result = subprocess.run(cmd, text=True, check=False)
-        if result.returncode != 0:
-            log.warning("%s exited with code %d", label or cmd[0], result.returncode)
-        return result.returncode
-    except FileNotFoundError:
-        log.error("Command not found: %s", cmd[0])
-        return -1

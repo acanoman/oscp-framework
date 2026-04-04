@@ -13,8 +13,9 @@ OSCP compliance:
 """
 
 import re
-import subprocess
 from pathlib import Path
+
+from core.runner import run_wrapper
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -55,7 +56,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
         "--ports",      ports_csv,
     ]
 
-    _exec(cmd, log, dry_run, label="services_enum.sh (dns)")
+    run_wrapper(cmd, session, label="services_enum.sh (dns)", dry_run=dry_run)
 
     if dry_run:
         return
@@ -137,23 +138,3 @@ def _parse_dns(session, log, domain: str) -> None:
         session.add_note(f"DNS hostnames discovered: {unique}")
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _exec(cmd: list, log, dry_run: bool, label: str = "") -> int:
-    display = " ".join(str(c) for c in cmd)
-    prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
-    log.info("%s %s", prefix, display)
-
-    if dry_run:
-        return 0
-
-    try:
-        result = subprocess.run(cmd, text=True, check=False)
-        if result.returncode != 0:
-            log.warning("%s exited with code %d", label or cmd[0], result.returncode)
-        return result.returncode
-    except FileNotFoundError:
-        log.error("Command not found: %s", cmd[0])
-        return -1

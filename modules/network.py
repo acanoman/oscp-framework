@@ -8,10 +8,10 @@ This module is the entry point when --modules network is forced, or when
 the engine needs to re-run recon against a target with known ports.
 """
 
-import subprocess
 from pathlib import Path
 
 from core.parser import NmapParser
+from core.runner import run_wrapper
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -46,7 +46,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
         cmd += ["--domain", session.info.domain]
 
     # Execute initial port scan
-    _exec(cmd, log, dry_run, label="recon.sh")
+    run_wrapper(cmd, session, label="recon.sh", dry_run=dry_run)
 
     # Supplemental topology discovery (traceroute, ICMP, ARP, reverse DNS)
     net_script = WRAPPERS_DIR / "network_enum.sh"
@@ -58,7 +58,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
         ]
         if session.info.domain:
             net_cmd += ["--domain", session.info.domain]
-        _exec(net_cmd, log, dry_run, label="network_enum.sh")
+        run_wrapper(net_cmd, session, label="network_enum.sh", dry_run=dry_run)
     else:
         log.warning("network_enum.sh not found — skipping topology discovery")
 
@@ -116,29 +116,3 @@ def run(target: str, session, dry_run: bool = False) -> None:
     log.info("Network module complete.")
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _exec(
-    cmd: list,
-    log,
-    dry_run: bool,
-    label: str = "",
-) -> int:
-    """Log and optionally execute a command, streaming output to the terminal."""
-    display = " ".join(str(c) for c in cmd)
-    prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
-    log.info("%s %s", prefix, display)
-
-    if dry_run:
-        return 0
-
-    try:
-        result = subprocess.run(cmd, text=True, check=False)
-        if result.returncode != 0:
-            log.warning("%s exited with code %d", label or cmd[0], result.returncode)
-        return result.returncode
-    except FileNotFoundError:
-        log.error("Command not found: %s — is bash available?", cmd[0])
-        return -1
