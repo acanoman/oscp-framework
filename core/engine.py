@@ -491,7 +491,7 @@ class Engine:
                 )
 
             output = result.stdout + result.stderr
-            match = re.search(r"[Tt][Tt][Ll]=(\d+)", output)
+            match = re.search(r"(?i)ttl\s*=\s*(\d+)", output)
 
             if match:
                 ttl = int(match.group(1))

