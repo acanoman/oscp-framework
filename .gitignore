@@ -15,3 +15,4 @@ legacy_code/vulpimancer/
 # OS
 .DS_Store
 Thumbs.db
+.claude/
