@@ -206,53 +206,41 @@ def _tool_block(tool: dict, info: "TargetInfo", lhost: str) -> List[str]:
 # Attacker Setup / Provisioning
 # ===========================================================================
 
-_LIGOLO_PROXY_URL = (
-    "https://github.com/nicocha30/ligolo-ng/releases/latest/download/"
-    "ligolo-ng_proxy_linux_amd64.tar.gz"
-)
-
-
 def _setup_block_windows(info: "TargetInfo") -> List[str]:
     """
-    Return the wget lines for Windows-specific tools (PrivEsc + pivot agents).
-    Always includes the Ligolo-ng proxy (Kali-side binary, Linux).
+    Exact, pinned provisioning commands for a Windows target.
+    Uses specific versioned URLs and includes unzip steps for archives.
+    Always appends AD tools when the target is identified as a DC.
     """
-    from core.arsenal_rules import WINDOWS_PRIVESC, AD_TOOLS, PIVOT_TOOLS_WINDOWS
-
-    privesc = [t for t in WINDOWS_PRIVESC if _check_condition(t["condition"], info)]
-    if _is_ad(info):
-        privesc += [t for t in AD_TOOLS if _check_condition(t["condition"], info)]
-
     lines = [
         "```bash",
-        "# [KALI LINUX] — Windows target tools",
-        "mkdir -p ~/tools/windows ~/tools/linux",
+        "# [KALI LINUX] — Windows Tools",
+        "mkdir -p ~/tools/windows && cd ~/tools/windows",
         "",
-        "# PrivEsc binaries (served via HTTP to the target)",
+        "# PrivEsc binaries",
+        "wget -q https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASx64.exe -O winPEASx64.exe",
+        "wget -q https://github.com/antonioCoco/JuicyPotatoNG/releases/latest/download/JuicyPotatoNG.zip"
+        " -O JuicyPotatoNG.zip && unzip -q JuicyPotatoNG.zip && rm JuicyPotatoNG.zip",
+        "wget -q https://github.com/itm4n/PrintSpoofer/releases/download/v1.0/PrintSpoofer64.exe -O PrintSpoofer64.exe",
     ]
-    for tool in privesc:
-        url  = tool.get("download_url", "")
-        dest = f"~/tools/{tool['dir']}/{tool['name']}"
-        lines.append(
-            f"wget -q '{url}' -O {dest}"
-            if url else
-            f"# {tool['name']} — no URL configured, download manually"
-        )
+
+    # AD tools appended when DC indicators are present
+    if _is_ad(info):
+        lines += [
+            "",
+            "# Active Directory tools (DC detected)",
+            "wget -q https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/raw/master/Rubeus.exe -O Rubeus.exe",
+            "wget -q https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/raw/master/Seatbelt.exe -O Seatbelt.exe",
+            "wget -q https://github.com/BloodHoundAD/BloodHound/raw/master/Collectors/SharpHound.exe -O SharpHound.exe",
+        ]
 
     lines += [
         "",
-        "# Pivot agents (transfer to target) + Ligolo proxy (stays on Kali)",
-    ]
-    for tool in PIVOT_TOOLS_WINDOWS:
-        url  = tool.get("download_url", "")
-        dest = f"~/tools/{tool['dir']}/{tool['name']}"
-        if url:
-            lines.append(f"wget -q '{url}' -O {dest}")
-
-    lines += [
-        f"wget -q '{_LIGOLO_PROXY_URL}' -O /tmp/ligolo-proxy.tar.gz",
-        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ 2>/dev/null",
-        "chmod +x ~/tools/linux/*",
+        "# Pivot — Windows agent (transfer to target) + Linux proxy (stays on Kali)",
+        "wget -q https://github.com/nicocha30/ligolo-ng/releases/download/v0.6.2/ligolo-ng_agent_0.6.2_windows_amd64.zip"
+        " -O ligolo_agent.zip && unzip -q ligolo_agent.zip && rm ligolo_agent.zip",
+        "wget -q https://github.com/nicocha30/ligolo-ng/releases/download/v0.6.2/ligolo-ng_proxy_0.6.2_linux_amd64.tar.gz"
+        " -O ligolo_proxy.tar.gz && tar -xzf ligolo_proxy.tar.gz && rm ligolo_proxy.tar.gz",
         "",
         "# Start file server — keep this terminal open",
         "cd ~/tools && python3 -m http.server 8000",
@@ -264,43 +252,27 @@ def _setup_block_windows(info: "TargetInfo") -> List[str]:
 
 def _setup_block_linux(info: "TargetInfo") -> List[str]:
     """
-    Return the wget lines for Linux-specific tools (PrivEsc + pivot agents).
+    Exact, pinned provisioning commands for a Linux target.
+    Uses specific versioned URLs and includes tar extraction steps for archives.
     """
-    from core.arsenal_rules import LINUX_PRIVESC, LINUX_KERNEL_EXPLOITS, PIVOT_TOOLS_LINUX
-
-    privesc = [t for t in LINUX_PRIVESC if _check_condition(t["condition"], info)]
-    privesc += [t for t in LINUX_KERNEL_EXPLOITS if _check_condition(t["condition"], info)]
-
     lines = [
         "```bash",
-        "# [KALI LINUX] — Linux target tools",
-        "mkdir -p ~/tools/linux",
+        "# [KALI LINUX] — Linux Tools",
+        "mkdir -p ~/tools/linux && cd ~/tools/linux",
         "",
-        "# PrivEsc + kernel exploit binaries",
-    ]
-    for tool in privesc:
-        url  = tool.get("download_url", "")
-        dest = f"~/tools/{tool['dir']}/{tool['name']}"
-        lines.append(
-            f"wget -q '{url}' -O {dest}"
-            if url else
-            f"# {tool['name']} — no URL configured, download manually"
-        )
-
-    lines += [
+        "# PrivEsc binaries",
+        "wget -q https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -O linpeas.sh",
+        "wget -q https://github.com/DominicBreuker/pspy/releases/latest/download/pspy64 -O pspy64",
+        "wget -q https://raw.githubusercontent.com/mzet-/linux-exploit-suggester/master/linux-exploit-suggester.sh -O les.sh",
         "",
-        "# Pivot agents (transfer to target) + Ligolo proxy (stays on Kali)",
-    ]
-    for tool in PIVOT_TOOLS_LINUX:
-        url  = tool.get("download_url", "")
-        dest = f"~/tools/{tool['dir']}/{tool['name']}"
-        if url:
-            lines.append(f"wget -q '{url}' -O {dest}")
-
-    lines += [
-        f"wget -q '{_LIGOLO_PROXY_URL}' -O /tmp/ligolo-proxy.tar.gz",
-        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ 2>/dev/null",
-        "chmod +x ~/tools/linux/*",
+        "# Pivot — Linux agent (transfer to target) + Linux proxy (stays on Kali)",
+        "wget -q https://github.com/nicocha30/ligolo-ng/releases/download/v0.6.2/ligolo-ng_agent_0.6.2_linux_amd64.tar.gz"
+        " -O ligolo_agent.tar.gz && tar -xzf ligolo_agent.tar.gz && rm ligolo_agent.tar.gz",
+        "wget -q https://github.com/nicocha30/ligolo-ng/releases/download/v0.6.2/ligolo-ng_proxy_0.6.2_linux_amd64.tar.gz"
+        " -O ligolo_proxy.tar.gz && tar -xzf ligolo_proxy.tar.gz && rm ligolo_proxy.tar.gz",
+        "",
+        "# Make binaries executable",
+        "chmod +x linpeas.sh pspy64 les.sh ligolo-agent ligolo-proxy 2>/dev/null; chmod +x * 2>/dev/null",
         "",
         "# Start file server — keep this terminal open",
         "cd ~/tools && python3 -m http.server 8000",
