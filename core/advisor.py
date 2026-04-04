@@ -206,88 +206,151 @@ def _tool_block(tool: dict, info: "TargetInfo", lhost: str) -> List[str]:
 # Attacker Setup / Provisioning
 # ===========================================================================
 
-def _attacker_setup(info: "TargetInfo", os_type: str) -> List[str]:
+_LIGOLO_PROXY_URL = (
+    "https://github.com/nicocha30/ligolo-ng/releases/latest/download/"
+    "ligolo-ng_proxy_linux_amd64.tar.gz"
+)
+
+
+def _setup_block_windows(info: "TargetInfo") -> List[str]:
     """
-    Generate attacker-side (Kali) provisioning commands: mkdir + wget for
-    every tool binary relevant to this target fingerprint.
-
-    Injected once at the top of the Arsenal section, before any transfer
-    commands, so the operator can run the setup block first and then start
-    the file server — no manual URL lookup needed.
+    Return the wget lines for Windows-specific tools (PrivEsc + pivot agents).
+    Always includes the Ligolo-ng proxy (Kali-side binary, Linux).
     """
-    from core.arsenal_rules import (
-        WINDOWS_PRIVESC, LINUX_PRIVESC, LINUX_KERNEL_EXPLOITS,
-        AD_TOOLS, PIVOT_TOOLS_WINDOWS, PIVOT_TOOLS_LINUX,
-    )
+    from core.arsenal_rules import WINDOWS_PRIVESC, AD_TOOLS, PIVOT_TOOLS_WINDOWS
 
-    # Collect tools relevant to this scan
-    if os_type == "Windows":
-        privesc_tools = [t for t in WINDOWS_PRIVESC if _check_condition(t["condition"], info)]
-        if _is_ad(info):
-            privesc_tools += AD_TOOLS
-        pivot_tools = PIVOT_TOOLS_WINDOWS
-        privesc_label = "# Windows PrivEsc + AD tools"
-    elif os_type == "Linux":
-        privesc_tools = [t for t in LINUX_PRIVESC if _check_condition(t["condition"], info)]
-        privesc_tools += [t for t in LINUX_KERNEL_EXPLOITS if _check_condition(t["condition"], info)]
-        pivot_tools = PIVOT_TOOLS_LINUX
-        privesc_label = "# Linux PrivEsc + kernel exploit tools"
-    else:
-        privesc_tools = []
-        pivot_tools   = PIVOT_TOOLS_LINUX
-        privesc_label = "# (OS unknown — add tools manually)"
+    privesc = [t for t in WINDOWS_PRIVESC if _check_condition(t["condition"], info)]
+    if _is_ad(info):
+        privesc += [t for t in AD_TOOLS if _check_condition(t["condition"], info)]
 
-    lines: List[str] = [
-        "---",
-        "",
-        "### 🛠️ Attacker Setup — Download Binaries to Kali",
-        "",
-        "> Run this block **once on Kali** before starting the file server.",
-        "> Skip `wget` lines for tools you already have in `~/tools/`.",
-        "",
+    lines = [
         "```bash",
-        "# [KALI LINUX] — create tool directories",
+        "# [KALI LINUX] — Windows target tools",
         "mkdir -p ~/tools/windows ~/tools/linux",
         "",
+        "# PrivEsc binaries (served via HTTP to the target)",
     ]
-
-    if privesc_tools:
-        lines.append(privesc_label)
-        for tool in privesc_tools:
-            url  = tool.get("download_url", "")
-            dest = f"~/tools/{tool['dir']}/{tool['name']}"
-            if url:
-                lines.append(f"wget -q '{url}' -O {dest}")
-            else:
-                lines.append(f"# {tool['name']} — download manually (no URL in rules)")
-        lines.append("")
+    for tool in privesc:
+        url  = tool.get("download_url", "")
+        dest = f"~/tools/{tool['dir']}/{tool['name']}"
+        lines.append(
+            f"wget -q '{url}' -O {dest}"
+            if url else
+            f"# {tool['name']} — no URL configured, download manually"
+        )
 
     lines += [
-        "# Pivoting agents (drop onto target) + proxy (stays on Kali)",
-        "# Ligolo-ng proxy — runs on Kali",
-        "wget -q 'https://github.com/nicocha30/ligolo-ng/releases/latest/download/"
-        "ligolo-ng_proxy_linux_amd64.tar.gz' -O /tmp/ligolo-proxy.tar.gz",
-        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ ligolo-proxy 2>/dev/null || "
-        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/",
         "",
+        "# Pivot agents (transfer to target) + Ligolo proxy (stays on Kali)",
     ]
-
-    for tool in pivot_tools:
+    for tool in PIVOT_TOOLS_WINDOWS:
         url  = tool.get("download_url", "")
         dest = f"~/tools/{tool['dir']}/{tool['name']}"
         if url:
             lines.append(f"wget -q '{url}' -O {dest}")
 
     lines += [
-        "",
-        "# Make Linux binaries executable",
+        f"wget -q '{_LIGOLO_PROXY_URL}' -O /tmp/ligolo-proxy.tar.gz",
+        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ 2>/dev/null",
         "chmod +x ~/tools/linux/*",
         "",
-        "# Start file server (keep this terminal open while exploiting)",
+        "# Start file server — keep this terminal open",
         "cd ~/tools && python3 -m http.server 8000",
         "```",
         "",
     ]
+    return lines
+
+
+def _setup_block_linux(info: "TargetInfo") -> List[str]:
+    """
+    Return the wget lines for Linux-specific tools (PrivEsc + pivot agents).
+    """
+    from core.arsenal_rules import LINUX_PRIVESC, LINUX_KERNEL_EXPLOITS, PIVOT_TOOLS_LINUX
+
+    privesc = [t for t in LINUX_PRIVESC if _check_condition(t["condition"], info)]
+    privesc += [t for t in LINUX_KERNEL_EXPLOITS if _check_condition(t["condition"], info)]
+
+    lines = [
+        "```bash",
+        "# [KALI LINUX] — Linux target tools",
+        "mkdir -p ~/tools/linux",
+        "",
+        "# PrivEsc + kernel exploit binaries",
+    ]
+    for tool in privesc:
+        url  = tool.get("download_url", "")
+        dest = f"~/tools/{tool['dir']}/{tool['name']}"
+        lines.append(
+            f"wget -q '{url}' -O {dest}"
+            if url else
+            f"# {tool['name']} — no URL configured, download manually"
+        )
+
+    lines += [
+        "",
+        "# Pivot agents (transfer to target) + Ligolo proxy (stays on Kali)",
+    ]
+    for tool in PIVOT_TOOLS_LINUX:
+        url  = tool.get("download_url", "")
+        dest = f"~/tools/{tool['dir']}/{tool['name']}"
+        if url:
+            lines.append(f"wget -q '{url}' -O {dest}")
+
+    lines += [
+        f"wget -q '{_LIGOLO_PROXY_URL}' -O /tmp/ligolo-proxy.tar.gz",
+        "tar -xzf /tmp/ligolo-proxy.tar.gz -C ~/tools/linux/ 2>/dev/null",
+        "chmod +x ~/tools/linux/*",
+        "",
+        "# Start file server — keep this terminal open",
+        "cd ~/tools && python3 -m http.server 8000",
+        "```",
+        "",
+    ]
+    return lines
+
+
+def _attacker_setup(info: "TargetInfo", os_type: str) -> List[str]:
+    """
+    Generate attacker-side (Kali) provisioning commands, strictly based on
+    the detected OS:
+
+      Windows → Windows PrivEsc tools + Windows pivot agents + Ligolo proxy
+      Linux   → Linux PrivEsc tools  + Linux pivot agents   + Ligolo proxy
+      Unknown → Both blocks under separate headings (prepare for either OS)
+    """
+    lines: List[str] = [
+        "---",
+        "",
+        "### 🛠️ Attacker Setup — Download Binaries to Kali",
+        "",
+        "> Run **once on Kali** before starting the file server.",
+        "> Skip any `wget` line for tools you already have in `~/tools/`.",
+        "",
+    ]
+
+    if os_type == "Windows":
+        lines += _setup_block_windows(info)
+
+    elif os_type == "Linux":
+        lines += _setup_block_linux(info)
+
+    else:
+        # OS unknown at scan time — emit both blocks so the operator is
+        # prepared regardless of what they find after landing a shell.
+        lines += [
+            "> ⚠️ OS could not be determined — both Windows and Linux blocks",
+            "> are included. Run only the block that matches your target.",
+            "",
+            "#### If target is Windows",
+            "",
+        ]
+        lines += _setup_block_windows(info)
+        lines += [
+            "#### If target is Linux",
+            "",
+        ]
+        lines += _setup_block_linux(info)
 
     return lines
 
