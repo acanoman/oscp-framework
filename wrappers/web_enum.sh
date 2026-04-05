@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wrappers/web_enum.sh — Web Enumeration Wrapper
-#  Tools: curl, whatweb, feroxbuster, gobuster, nikto, wpscan
+#  Tools: curl, whatweb, feroxbuster, gobuster, nikto, wpscan, ffuf, sslscan
 #
 #  OSCP compliance:
 #    - Safe enumeration only (no exploit payloads)
@@ -131,7 +131,7 @@ echo ""
 # ===========================================================================
 # 1 — HTTP Headers + Quick reconnaissance (curl)
 # ===========================================================================
-info "[1/8] HTTP headers and initial page info (curl)"
+info "[1/10] HTTP headers and initial page info (curl)"
 
 HEADERS_OUT="${WEB_DIR}/headers${SUFFIX}.txt"
 cmd "curl -ksI --max-time 10 $BASE_URL"
@@ -168,7 +168,7 @@ echo ""
 # ===========================================================================
 # 2 — WhatWeb (technology fingerprinting)
 # ===========================================================================
-info "[2/8] WhatWeb — technology fingerprinting"
+info "[2/10] WhatWeb — technology fingerprinting"
 WHATWEB_OUT="${WEB_DIR}/whatweb${SUFFIX}.txt"
 
 if command -v whatweb &>/dev/null; then
@@ -228,7 +228,7 @@ echo ""
 # ===========================================================================
 # 3 — CMS Detection + wpscan (WordPress only)
 # ===========================================================================
-info "[3/8] CMS detection"
+info "[3/10] CMS detection"
 CMS_DETECTED=""
 
 # Fetch page body for CMS fingerprinting
@@ -283,7 +283,7 @@ echo ""
 # ===========================================================================
 # 4 — Gobuster dir — QUICK scan (common wordlist)
 # ===========================================================================
-info "[4/8] Gobuster — quick directory scan (common.txt)"
+info "[4/10] Gobuster — quick directory scan (common.txt)"
 GB_QUICK_OUT="${WEB_DIR}/gobuster${SUFFIX}.txt"
 
 if command -v gobuster &>/dev/null; then
@@ -310,7 +310,7 @@ echo ""
 # ===========================================================================
 # 5 — Feroxbuster — recursive deep scan (medium wordlist)
 # ===========================================================================
-info "[5/8] Feroxbuster — recursive deep scan (medium wordlist)"
+info "[5/10] Feroxbuster — recursive deep scan (medium wordlist)"
 FEROX_OUT="${WEB_DIR}/feroxbuster${SUFFIX}.txt"
 
 if command -v feroxbuster &>/dev/null; then
@@ -359,7 +359,7 @@ echo ""
 #   1. seclists CGIs.txt  (purpose-built, ~3 k entries)
 #   2. dirb common.txt    (fallback — broader but still fast)
 # ===========================================================================
-info "[6/9] Dynamic CGI/Script Sniper — hunting scripts in discovered directories"
+info "[6/10] Dynamic CGI/Script Sniper — hunting scripts in discovered directories"
 
 CGI_SNIPER_OUT="${WEB_DIR}/dynamic_cgi_sniper${SUFFIX}.txt"
 > "$CGI_SNIPER_OUT"   # reset output file
@@ -431,13 +431,66 @@ fi
 echo ""
 
 # ===========================================================================
-# 7 — Gobuster vhost enumeration (if domain known)
+# 7 — Virtual host fuzzing (ffuf preferred, gobuster fallback)
+#
+# WHY ffuf over gobuster:
+#   - ffuf fuzzes the Host: header directly, catching vhosts that return 200
+#     instead of redirect (gobuster --append-domain misses these)
+#   - Response-size filtering (-fs) eliminates false positives automatically
+#     without manual tuning
+#   - Runs without --append-domain quirks on older gobuster versions
+#
+# Strategy:
+#   1. Probe with a guaranteed-invalid hostname to get the default response
+#      size ("baseline") — this is what the server returns for unknown vhosts
+#   2. Run ffuf filtering out baseline-sized responses (-fs $BASELINE_SIZE)
+#      so only real vhosts appear in output
+#   3. Fall back to gobuster vhost if ffuf is not installed
 # ===========================================================================
-if [[ -n "$DOMAIN" ]]; then
-    info "[7/9] Gobuster — virtual host enumeration"
-    VHOST_OUT="${WEB_DIR}/vhosts${SUFFIX}.txt"
+FFUF_VHOST_OUT="${WEB_DIR}/ffuf_vhost${SUFFIX}.txt"
+GOBUSTER_VHOST_OUT="${WEB_DIR}/vhosts${SUFFIX}.txt"
 
-    if command -v gobuster &>/dev/null && [[ -n "$WL_VHOST" ]]; then
+if [[ -n "$DOMAIN" ]]; then
+    info "[7/10] Virtual host fuzzing (Host header enumeration)"
+
+    if [[ -z "$WL_VHOST" ]]; then
+        warn "No vhost wordlist found — skipping vhost fuzzing."
+        hint "Install seclists: sudo apt install seclists"
+
+    elif command -v ffuf &>/dev/null; then
+        # ── ffuf: measure baseline before fuzzing ──────────────────────
+        info "Measuring baseline response size for unknown-host probe..."
+        BASELINE_SIZE=$(
+            curl -sk --max-time 8 \
+                -H "Host: oscp-invalid-probe-$(date +%s).${DOMAIN}" \
+                -o /dev/null -w '%{size_download}' \
+                "$BASE_URL" 2>/dev/null || echo 0
+        )
+        ok "Baseline size: ${WHITE}${BASELINE_SIZE}${NC} bytes (will be filtered from results)"
+
+        cmd "ffuf -u ${BASE_URL}/ -H 'Host: FUZZ.${DOMAIN}' -w ${WL_VHOST} -fs ${BASELINE_SIZE} -t 50 -mc 200,204,301,302,307,401,403"
+        ffuf \
+            -u "${BASE_URL}/" \
+            -H "Host: FUZZ.${DOMAIN}" \
+            -w "$WL_VHOST" \
+            -fs "$BASELINE_SIZE" \
+            -t 50 \
+            -mc "200,204,301,302,307,401,403" \
+            -s \
+            2>/dev/null | tee "$FFUF_VHOST_OUT" || true
+
+        # Non-silent summary line for the operator
+        VHOST_COUNT=$(grep -cE '\S' "$FFUF_VHOST_OUT" 2>/dev/null || echo 0)
+        if [[ "$VHOST_COUNT" -gt 0 ]]; then
+            ok "${RED}⚠  ffuf: ${VHOST_COUNT} virtual host(s) discovered!${NC} → ${FFUF_VHOST_OUT}"
+            warn "Add each vhost to /etc/hosts and re-enumerate with --domain"
+        else
+            info "ffuf: no hidden vhosts found at baseline filter size ${BASELINE_SIZE}"
+        fi
+
+    elif command -v gobuster &>/dev/null; then
+        # ── gobuster fallback ──────────────────────────────────────────
+        info "ffuf not found — using gobuster vhost as fallback"
         cmd "gobuster vhost -u $BASE_URL -w $WL_VHOST --domain $DOMAIN --append-domain -t 50 -k"
         gobuster vhost \
             -u "$BASE_URL" \
@@ -445,26 +498,65 @@ if [[ -n "$DOMAIN" ]]; then
             --domain "$DOMAIN" \
             --append-domain \
             -t 50 -k \
-            -o "$VHOST_OUT" 2>&1 | tee "${VHOST_OUT}.log" || true
-        ok "VHost scan done → ${WHITE}${VHOST_OUT}${NC}"
+            -o "$GOBUSTER_VHOST_OUT" 2>&1 | tee "${GOBUSTER_VHOST_OUT}.log" || true
+        ok "Gobuster vhost done → ${WHITE}${GOBUSTER_VHOST_OUT}${NC}"
+
     else
-        warn "gobuster or vhost wordlist not available — skipping vhost scan."
-        hint "Manual vhost scan:
-    gobuster vhost -u ${BASE_URL} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \\
-        --domain ${DOMAIN} --append-domain -t 50 -k"
+        warn "Neither ffuf nor gobuster available — skipping vhost scan."
+        hint "Install ffuf: sudo apt install ffuf"
     fi
-    echo ""
+
 else
-    info "[7/9] No domain supplied — skipping vhost enumeration."
+    info "[7/10] No domain supplied — skipping vhost enumeration."
     hint "If you discover a hostname/domain, rerun with:
     bash wrappers/web_enum.sh --target ${TARGET} --output-dir <DIR> --port ${PORT} --domain <DOMAIN>"
-    echo ""
 fi
+echo ""
 
 # ===========================================================================
-# 7 — Nikto (safe web scan)
+# 8 — SSLscan — TLS/SSL configuration audit (HTTPS ports only)
+#
+# Checks for: Heartbleed (CVE-2014-0160), SSLv2/SSLv3, POODLE, EXPORT
+# cipher suites (FREAK/LOGJAM), TLS 1.0/1.1, weak RC4 ciphers, and
+# certificate validity.
+#
+# --no-colour strips ANSI codes so the Python parser can read the file
+# cleanly with plain regex.
 # ===========================================================================
-info "[8/9] Nikto — web vulnerability scan (max 15 min)"
+SSLSCAN_OUT="${WEB_DIR}/sslscan${SUFFIX}.txt"
+
+if [[ "$PROTO" == "https" ]]; then
+    info "[8/10] sslscan — TLS/SSL configuration audit"
+
+    if command -v sslscan &>/dev/null; then
+        cmd "sslscan --no-colour ${TARGET}:${PORT}"
+        sslscan --no-colour "${TARGET}:${PORT}" > "$SSLSCAN_OUT" 2>&1 || true
+
+        # Inline critical alerts — Python parser also surfaces these in notes.md
+        if grep -qi 'Heartbleed.*vulnerable\|vulnerable.*Heartbleed' \
+                "$SSLSCAN_OUT" 2>/dev/null; then
+            warn "${RED}⚠  HEARTBLEED (CVE-2014-0160) DETECTED on port ${PORT}!${NC}"
+            warn "   Memory leak — can expose private keys and credentials."
+        fi
+        if grep -qiE 'SSLv2.*enabled|SSLv3.*enabled' "$SSLSCAN_OUT" 2>/dev/null; then
+            warn "Deprecated SSL protocol(s) enabled — check ${SSLSCAN_OUT}"
+        fi
+
+        ok "sslscan done → ${WHITE}${SSLSCAN_OUT}${NC}"
+    else
+        skip "sslscan"
+        hint "Install: sudo apt install sslscan
+    Then run: sslscan --no-colour ${TARGET}:${PORT} > ${SSLSCAN_OUT}"
+    fi
+else
+    info "[8/10] HTTP port — sslscan skipped (HTTPS only)"
+fi
+echo ""
+
+# ===========================================================================
+# 9 — Nikto (safe web scan)
+# ===========================================================================
+info "[9/10] Nikto — web vulnerability scan (max 15 min)"
 NIKTO_OUT="${WEB_DIR}/nikto${SUFFIX}.txt"
 NIKTO_SSL=""
 [[ "$PROTO" == "https" ]] && NIKTO_SSL="-ssl"
@@ -486,7 +578,7 @@ echo ""
 # ===========================================================================
 # 8 — Manual-only hints (NO automation for these)
 # ===========================================================================
-info "[9/9] Additional manual steps required"
+info "[10/10] Additional manual steps required"
 
 hint "LFI fuzzing — run manually with your wordlist:
     ffuf -u '${BASE_URL}/FUZZ' \\
@@ -514,12 +606,15 @@ echo ""
 echo -e "  ${BOLD}============================================================${NC}"
 echo -e "  ${BOLD}  WEB ENUM SUMMARY — ${BASE_URL}${NC}"
 echo -e "  ${BOLD}============================================================${NC}"
-[[ -s "$WHATWEB_OUT" ]]     && echo "  [+] WhatWeb    : ${WHATWEB_OUT}"
-[[ -s "$GB_QUICK_OUT" ]]   && echo "  [+] Gobuster   : ${GB_QUICK_OUT}"
-[[ -s "$FEROX_OUT" ]]      && echo "  [+] Feroxbuster: ${FEROX_OUT}"
-[[ -s "$CGI_SNIPER_OUT" ]] && echo "  [!] CGI Sniper : ${CGI_SNIPER_OUT}"
-[[ -s "$NIKTO_OUT" ]]      && echo "  [+] Nikto      : ${NIKTO_OUT}"
-[[ -n "$CMS_DETECTED" ]]   && echo "  [!] CMS        : ${CMS_DETECTED}"
+[[ -s "$WHATWEB_OUT" ]]          && echo "  [+] WhatWeb    : ${WHATWEB_OUT}"
+[[ -s "$GB_QUICK_OUT" ]]        && echo "  [+] Gobuster   : ${GB_QUICK_OUT}"
+[[ -s "$FEROX_OUT" ]]           && echo "  [+] Feroxbuster: ${FEROX_OUT}"
+[[ -s "$CGI_SNIPER_OUT" ]]      && echo "  [!] CGI Sniper : ${CGI_SNIPER_OUT}"
+[[ -s "$FFUF_VHOST_OUT" ]]      && echo "  [!] VHost(ffuf): ${FFUF_VHOST_OUT}"
+[[ -s "$GOBUSTER_VHOST_OUT" ]]  && echo "  [+] VHost(gb)  : ${GOBUSTER_VHOST_OUT}"
+[[ -s "$SSLSCAN_OUT" ]]         && echo "  [+] SSLscan    : ${SSLSCAN_OUT}"
+[[ -s "$NIKTO_OUT" ]]           && echo "  [+] Nikto      : ${NIKTO_OUT}"
+[[ -n "$CMS_DETECTED" ]]        && echo "  [!] CMS        : ${CMS_DETECTED}"
 echo ""
 ok "Web enumeration complete."
 echo ""

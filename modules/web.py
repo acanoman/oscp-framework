@@ -10,8 +10,9 @@ Port → protocol detection:
 """
 
 import re
+import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from rich.console import Console
 
@@ -102,10 +103,11 @@ def run(target: str, session, dry_run: bool = False) -> None:
         display = " ".join(str(c) for c in cmd)
         console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
 
+        cms: Optional[str] = None
         try:
             run_wrapper(cmd, session, label=f"web_enum.sh port {port}", dry_run=dry_run)
             if not dry_run:
-                _parse_web_output(port, session, log)
+                cms = _parse_web_output(port, session, log)
 
         except KeyboardInterrupt:
             # run_wrapper already sent SIGTERM/SIGKILL to the process group
@@ -127,6 +129,12 @@ def run(target: str, session, dry_run: bool = False) -> None:
             session.finalize_notes()
             session.save_state()
             continue
+
+        # CMS router — runs OUTSIDE the port-abort block so Ctrl+C during
+        # the CMS scan is handled by _run_cms_scanner() internally and does
+        # NOT falsely mark this port as skipped.
+        if cms and not dry_run:
+            _run_cms_scanner(port, proto, target, cms, session, log, dry_run)
 
     log.info("Web module complete.")
 
@@ -176,15 +184,22 @@ def _detect_web_ports(session) -> list:
 # Output parsers — run after each wrapper completes
 # ---------------------------------------------------------------------------
 
-def _parse_web_output(port: int, session, log) -> None:
-    """Parse gobuster, feroxbuster, whatweb, and CGI sniper output for a given port."""
+def _parse_web_output(port: int, session, log) -> Optional[str]:
+    """Parse gobuster, feroxbuster, whatweb, and CGI sniper output for a given port.
+
+    Returns the first CMS name detected by whatweb (e.g. "WordPress"), or None.
+    The caller uses this to decide whether to invoke the CMS-specific scanner.
+    """
     suffix = "" if port in {80, 443} else f"_port{port}"
     web_dir = session.target_dir / "web"
 
     _parse_directory_scan(web_dir, suffix, session, log)
-    _parse_whatweb(web_dir, suffix, session, log)
+    cms = _parse_whatweb(web_dir, suffix, session, log)
     _parse_hostnames(web_dir, session, log)
+    _parse_vhost_scan(web_dir, suffix, session, log)
+    _parse_sslscan(web_dir, suffix, session, log)
     _parse_cgi_sniper(web_dir, suffix, session, log)
+    return cms
 
 
 def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
@@ -231,31 +246,41 @@ def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
         log.info("Web paths discovered (%s): %d total", suffix or "port 80/443", len(paths))
 
 
-def _parse_whatweb(web_dir: Path, suffix: str, session, log) -> None:
-    """Extract tech stack info from whatweb output and store as notes."""
+def _parse_whatweb(web_dir: Path, suffix: str, session, log) -> Optional[str]:
+    """Extract tech stack info from whatweb output and store as notes.
+
+    Returns the first CMS name matched (e.g. "WordPress"), or None.
+    Priority order: WordPress > Drupal > Joomla (most OSCP-common first).
+    """
     whatweb_file = web_dir / f"whatweb{suffix}.txt"
     if not whatweb_file.exists() or whatweb_file.stat().st_size == 0:
-        return
+        return None
 
     content = whatweb_file.read_text(errors="ignore")
 
-    # Look for CMS indicators
+    # CMS patterns in priority order — first match wins and is returned to
+    # the caller for routing; all matches are noted regardless.
     cms_patterns = {
         "WordPress": r'WordPress',
-        "Joomla":    r'Joomla',
         "Drupal":    r'Drupal',
+        "Joomla":    r'Joomla',
     }
+    detected: Optional[str] = None
     for cms, pattern in cms_patterns.items():
         if re.search(pattern, content, re.IGNORECASE):
             note = f"CMS detected: {cms} (port{suffix or ' 80/443'})"
             if note not in session.info.notes:
                 session.add_note(note)
                 log.info("CMS detected: %s", cms)
+            if detected is None:
+                detected = cms
 
     # Extract server/framework info (first line summary)
     first_line = content.splitlines()[0] if content.strip() else ""
     if first_line:
         session.add_note(f"WhatWeb{suffix}: {first_line[:120]}")
+
+    return detected
 
 
 def _parse_hostnames(web_dir: Path, session, log) -> None:
@@ -272,6 +297,152 @@ def _parse_hostnames(web_dir: Path, session, log) -> None:
             session.add_note(
                 f"Hostname via redirect: {hostname} — add to /etc/hosts if needed"
             )
+
+
+def _parse_vhost_scan(web_dir: Path, suffix: str, session, log) -> None:
+    """
+    Parse ffuf and gobuster vhost scan output for new virtual hostname
+    discoveries.  Handles both tool output formats and de-duplicates against
+    session.info.domains_found.
+
+    ffuf text output (via -s / silent mode):
+        admin.corp.local [Status: 200, Size: 4096, Words: 231, Lines: 47]
+
+    gobuster vhost output:
+        Found: admin.corp.local (Status: 200) [Size: 4096]
+
+    Any newly discovered hostname is added to session.info.domains_found and
+    noted with an /etc/hosts reminder so the operator acts on it immediately.
+    """
+    new_hosts: List[str] = []
+
+    # Check both possible output files — ffuf preferred, gobuster fallback
+    for fname in (f"ffuf_vhost{suffix}.txt", f"vhosts{suffix}.txt"):
+        fpath = web_dir / fname
+        if not fpath.exists() or fpath.stat().st_size == 0:
+            continue
+
+        for line in fpath.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # ffuf silent output:  "subdomain.domain.tld [Status: NNN, ...]"
+            # gobuster vhost:      "Found: subdomain.domain.tld (Status: NNN)"
+            m = re.search(
+                r'^(?:Found:\s+)?([A-Za-z0-9][A-Za-z0-9\-\.]+\.[A-Za-z]{2,})'
+                r'\s+[\[\(](?:Status:)?\s*\d{3}',
+                line, re.IGNORECASE,
+            )
+            if not m:
+                continue
+
+            host = m.group(1).strip().lower()
+            # Skip bare IPs
+            if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
+                continue
+            if host not in session.info.domains_found:
+                session.info.domains_found.append(host)
+                new_hosts.append(host)
+                log.info("VHost discovered: %s", host)
+
+    for host in new_hosts:
+        session.add_note(
+            f"🌐 VHost discovered: {host} — "
+            f"add to /etc/hosts and re-enumerate: "
+            f"echo '{session.info.ip}  {host}' | sudo tee -a /etc/hosts"
+        )
+
+    if new_hosts:
+        log.info(
+            "VHost scan found %d new hostname(s): %s",
+            len(new_hosts), new_hosts,
+        )
+
+
+def _parse_sslscan(web_dir: Path, suffix: str, session, log) -> None:
+    """
+    Parse sslscan --no-colour output for critical TLS weaknesses.
+
+    Severity tiers:
+      ⚠️  CRITICAL  — Heartbleed, SSLv2 (active exploit potential)
+      ⚠️  HIGH      — SSLv3/POODLE, EXPORT ciphers (FREAK/LOGJAM)
+      ℹ️  INFO       — TLSv1.0, RC4, self-signed cert, expiry
+
+    Each unique finding is added to session.info.notes exactly once.
+    Heartbleed is promoted to log.warning() so it appears in the console
+    output immediately rather than only in notes.md.
+    """
+    sslscan_file = web_dir / f"sslscan{suffix}.txt"
+    if not sslscan_file.exists() or sslscan_file.stat().st_size == 0:
+        return
+
+    content    = sslscan_file.read_text(errors="ignore")
+    port_label = "443" if suffix == "" else suffix.lstrip("_port")
+
+    # Ordered by severity — first match wins the log level
+    _CHECKS: List[Tuple[str, str, str]] = [
+        # (regex pattern, note text, log level: "warn" | "info")
+        (
+            r'Heartbleed.*?vulnerable|vulnerable.*?Heartbleed',
+            f"⚠️  HEARTBLEED (CVE-2014-0160) on port {port_label} — "
+            f"memory leak; private keys and credentials may be extractable",
+            "warn",
+        ),
+        (
+            r'SSLv2\s+enabled|SSLv2.*?Enabled',
+            f"⚠️  SSLv2 enabled on port {port_label} — "
+            f"deprecated since 1996; multiple published exploits",
+            "warn",
+        ),
+        (
+            r'SSLv3\s+enabled|SSLv3.*?Enabled',
+            f"⚠️  SSLv3 enabled on port {port_label} — "
+            f"POODLE (CVE-2014-3566); CBC padding oracle attack",
+            "warn",
+        ),
+        (
+            r'EXP-[A-Z0-9\-]+\s+Accepted|EXPORT.*?cipher|cipher.*?EXPORT',
+            f"⚠️  EXPORT cipher suites accepted on port {port_label} — "
+            f"FREAK (CVE-2015-0204) / LOGJAM (CVE-2015-4000) attack surface",
+            "warn",
+        ),
+        (
+            r'TLSv1\.0\s+enabled|TLSv1\.0.*?Enabled',
+            f"ℹ️   TLSv1.0 enabled on port {port_label} — "
+            f"BEAST overlap; best-practice is to disable",
+            "info",
+        ),
+        (
+            r'RC4.*?Accepted|Accepted.*?RC4',
+            f"ℹ️   RC4 cipher(s) accepted on port {port_label} — "
+            f"statistically weak; biased keystream attacks",
+            "info",
+        ),
+    ]
+
+    for pattern, note_text, level in _CHECKS:
+        if re.search(pattern, content, re.IGNORECASE):
+            if note_text not in session.info.notes:
+                session.add_note(note_text)
+                if level == "warn":
+                    log.warning("sslscan: %s", note_text)
+                else:
+                    log.info("sslscan: %s", note_text)
+
+    # Certificate status — informational only
+    if re.search(r'self.?signed|Self.?Signed', content, re.IGNORECASE):
+        note = f"ℹ️   TLS cert on port {port_label}: self-signed (no CA validation)"
+        if note not in session.info.notes:
+            session.add_note(note)
+
+    # Expired cert — flag for credential/session reuse scenarios
+    if re.search(r'Not valid after.*?20[01]\d', content, re.IGNORECASE):
+        note = f"ℹ️   TLS cert on port {port_label}: may be expired — verify dates"
+        if note not in session.info.notes:
+            session.add_note(note)
+
+    log.info("sslscan output parsed for port%s", suffix or " 443")
 
 
 # ---------------------------------------------------------------------------
@@ -318,3 +489,172 @@ def _parse_cgi_sniper(web_dir: Path, suffix: str, session, log) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# CMS Smart Router — triggered by _parse_whatweb() return value
+# ---------------------------------------------------------------------------
+
+# Maps CMS name → (binary name, command builder, output filename template,
+#                   install hint)
+_CMS_TOOL_MAP = {
+    "WordPress": {
+        "bin":     "wpscan",
+        "cmd":     lambda url, out: [
+            "wpscan", "--url", url, "--no-update",
+            "--enumerate", "u,vp,vt,cb,dbe",
+            "--output", str(out), "--format", "cli",
+        ],
+        "out":     "wpscan{suffix}.txt",
+        "install": "gem install wpscan  OR  apt install wpscan",
+    },
+    "Drupal": {
+        "bin":     "droopescan",
+        "cmd":     lambda url, out: [
+            "droopescan", "scan", "drupal", "-u", url,
+        ],
+        "out":     "droopescan{suffix}.txt",
+        "install": "pip3 install droopescan",
+    },
+    "Joomla": {
+        "bin":     "joomscan",
+        "cmd":     lambda url, out: [
+            "joomscan", "--url", url,
+        ],
+        "out":     "joomscan{suffix}.txt",
+        "install": "apt install joomscan  OR  git clone https://github.com/OWASP/joomscan",
+    },
+}
+
+
+def _run_cms_scanner(
+    port: int,
+    proto: str,
+    target: str,
+    cms: str,
+    session,
+    log,
+    dry_run: bool,
+) -> None:
+    """
+    Dispatch the appropriate CMS scanner for the detected platform.
+
+    Design decisions
+    ----------------
+    - Called from run() OUTSIDE the per-port KeyboardInterrupt block so a
+      Ctrl+C here does not mark the port as skipped in session state.
+    - Handles its own KeyboardInterrupt internally — the scan is skipped but
+      the session continues cleanly to the next port.
+    - Gracefully degrades when the scanner binary is not installed: logs a
+      warning and records a manual-follow-up note rather than erroring out.
+    - Output is written to web/<tool><suffix>.txt, mirroring the existing
+      naming convention for all other web module outputs.
+    """
+    spec = _CMS_TOOL_MAP.get(cms)
+    if not spec:
+        return
+
+    console   = Console()
+    tool      = spec["bin"]
+    suffix    = "" if port in {80, 443} else f"_port{port}"
+    web_dir   = session.target_dir / "web"
+    base_url  = (
+        f"{proto}://{target}"
+        if port in {80, 443}
+        else f"{proto}://{target}:{port}"
+    )
+    out_file  = web_dir / spec["out"].format(suffix=suffix)
+    cmd       = spec["cmd"](base_url, out_file)
+
+    console.print()
+    console.print(
+        f"  [bold cyan][CMS ROUTER][/bold cyan] "
+        f"[bold]{cms}[/bold] detected on port [cyan]{port}[/cyan] "
+        f"→ launching [bold]{tool}[/bold]"
+    )
+
+    # Graceful degradation — warn but never crash if tool is absent
+    if not shutil.which(tool):
+        log.warning(
+            "CMS router: '%s' not in PATH — skipping %s scan (install: %s)",
+            tool, cms, spec["install"],
+        )
+        console.print(
+            f"  [bold yellow][!][/bold yellow] [yellow]{tool}[/yellow] not installed "
+            f"— skipping {cms} scan.\n"
+            f"  Install: [dim]{spec['install']}[/dim]"
+        )
+        session.add_note(
+            f"⚠️  {cms} detected on port {port} but {tool} not found — "
+            f"manual scan required. Install: {spec['install']}"
+        )
+        return
+
+    display = " ".join(str(c) for c in cmd)
+    console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
+    log.info("CMS router: %s on port %d → %s", cms, port, tool)
+
+    if dry_run:
+        return
+
+    try:
+        run_wrapper(cmd, session, label=f"{tool} port {port}", dry_run=False)
+        if out_file.exists() and out_file.stat().st_size > 0:
+            session.add_note(
+                f"✅ {tool} completed for port {port} — see web/{out_file.name}"
+            )
+            _parse_cms_output(cms, out_file, session, log)
+        else:
+            log.warning("%s produced no output for port %d", tool, port)
+
+    except KeyboardInterrupt:
+        console.print(
+            f"\n  [bold yellow][WARNING][/bold yellow] "
+            f"{tool} scan on port [cyan]{port}[/cyan] skipped by user (Ctrl+C) "
+            f"— continuing to next port."
+        )
+        log.warning("%s scan on port %d skipped by user (Ctrl+C)", tool, port)
+        session.add_note(
+            f"⚠️  {tool} scan on port {port} SKIPPED by user (Ctrl+C)"
+        )
+
+
+def _parse_cms_output(cms: str, out_file: Path, session, log) -> None:
+    """
+    Extract high-value findings from CMS scanner output.
+
+    Parses just enough to surface actionable items into session notes:
+    - WordPress: vulnerability lines, enumerated usernames
+    - Drupal/Joomla: vulnerability/CVE references
+
+    Full detail is always available in the output file itself.
+    """
+    content = out_file.read_text(errors="ignore")
+
+    if cms == "WordPress":
+        for line in content.splitlines():
+            stripped = line.strip()
+            # wpscan marks exploitable findings with [!]
+            if re.search(r'\[!\]', stripped) and re.search(
+                r'vulnerab|exploit|CVE-', stripped, re.IGNORECASE
+            ):
+                session.add_note(f"⚠️  WPScan: {stripped[:140]}")
+                log.warning("WPScan finding: %s", stripped[:140])
+
+            # Username enumeration results
+            m = re.search(
+                r'(?:Username|user)\s+found\s*:?\s+([A-Za-z0-9_\-\.]+)',
+                stripped, re.IGNORECASE,
+            )
+            if m:
+                user = m.group(1)
+                if user not in session.info.users_found:
+                    session.info.users_found.append(user)
+                    log.info("WPScan user found: %s", user)
+                    session.add_note(f"👤 WPScan user enumerated: {user}")
+
+    else:
+        # Drupal / Joomla — flag any vulnerability or CVE references
+        for line in content.splitlines():
+            stripped = line.strip()
+            if re.search(r'vulnerab|CVE-\d{4}-\d+|exploit', stripped, re.IGNORECASE):
+                session.add_note(f"⚠️  {cms} scanner: {stripped[:140]}")
+                log.warning("%s scanner finding: %s", cms, stripped[:140])
