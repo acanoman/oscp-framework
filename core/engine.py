@@ -110,6 +110,12 @@ SERVICE_MODULE_MAP: Dict[str, str] = {
     "ssl/wsman":          "remote",
     "vnc":                "remote",
     "ssl/vnc":            "remote",
+    # ── Kerberos (DC indicator — routed to ldap module for full AD enum) ─
+    "kerberos-sec":       "ldap",        # port 88 most common Nmap label
+    "kerberos":           "ldap",
+    "kerberos5":          "ldap",
+    "kpasswd":            "ldap",        # port 464 — Kerberos password change
+    "kpasswd5":           "ldap",
     # ── Mail ────────────────────────────────────────────────────────────
     "smtp":               "mail",
     "smtps":              "mail",
@@ -142,13 +148,15 @@ _PORT_FALLBACK_MAP: Dict[int, str] = {
     22:    "services",
     23:    "services",   # Telnet
     53:    "dns",
-    135:   "services",   # MSRPC / RPC Endpoint Mapper
+    88:    "ldap",       # Kerberos — DC indicator; ldap module handles kerbrute
     111:   "nfs",
+    135:   "services",   # MSRPC / RPC Endpoint Mapper
     139:   "smb",
     161:   "snmp",
     162:   "snmp",
     389:   "ldap",
     445:   "smb",
+    464:   "ldap",       # Kerberos password change — also DC indicator
     636:   "ldap",
     2049:  "nfs",
     3268:  "ldap",
@@ -443,6 +451,10 @@ class Engine:
             # Non-blocking check: alert if the background NSE vuln scan finished
             self._check_vuln_scan()
 
+            # If a module (e.g. ldap) just discovered the domain, write it to
+            # domain.txt so subsequent wrappers (smb_enum.sh) can read it.
+            self._write_domain_file()
+
             # Incremental flush — notes.md is always current after each module
             self.session.finalize_notes()
             self.session.save_state()
@@ -588,6 +600,30 @@ class Engine:
             self.log.warning(
                 "Nmap XML not found at %s — did recon.sh run correctly?", nmap_xml
             )
+
+        # Persist any domain discovered during Nmap parse (RootDSE / hostnames)
+        self._write_domain_file()
+
+    def _write_domain_file(self) -> None:
+        """
+        Write the currently known domain to output/targets/<IP>/domain.txt.
+
+        Called after Nmap parse and after every module so that bash wrappers
+        that run later (ldap_enum.sh, smb_enum.sh) can read it directly without
+        needing the Python layer to pass --domain explicitly.
+
+        No-ops silently when no domain is known yet.
+        """
+        domain = self.info.domain
+        if not domain:
+            return
+
+        domain_file = self.session.target_dir / "domain.txt"
+        try:
+            domain_file.write_text(domain.strip(), encoding="utf-8")
+            self.log.info("Domain file written: %s → %s", domain_file, domain)
+        except OSError as exc:
+            self.log.warning("Could not write domain.txt: %s", exc)
 
     def _read_vuln_pid(self) -> None:
         """

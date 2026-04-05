@@ -46,6 +46,16 @@ if [[ -z "$TARGET" || -z "$OUTPUT_DIR" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Domain resolution — read domain.txt written by the Python engine if
+# --domain was not supplied on the command line.
+# ---------------------------------------------------------------------------
+DOMAIN_FILE="${OUTPUT_DIR}/domain.txt"
+if [[ -z "$DOMAIN" && -f "$DOMAIN_FILE" ]]; then
+    DOMAIN=$(cat "$DOMAIN_FILE" | tr -d '[:space:]')
+    [[ -n "$DOMAIN" ]] && ok "Domain read from domain.txt: ${WHITE}${DOMAIN}${NC}"
+fi
+
 SMB_DIR="${OUTPUT_DIR}/smb"
 mkdir -p "$SMB_DIR"
 
@@ -88,8 +98,13 @@ info "[2/7] enum4linux (null session)"
 E4L_OUT="${SMB_DIR}/enum4linux.txt"
 
 if command -v enum4linux-ng &>/dev/null; then
-    cmd "enum4linux-ng -A $TARGET"
-    enum4linux-ng -A "$TARGET" 2>&1 | tee "$E4L_OUT" || true
+    if [[ -n "$DOMAIN" ]]; then
+        cmd "enum4linux-ng -A -d $DOMAIN $TARGET"
+        enum4linux-ng -A -d "$DOMAIN" "$TARGET" 2>&1 | tee "$E4L_OUT" || true
+    else
+        cmd "enum4linux-ng -A $TARGET"
+        enum4linux-ng -A "$TARGET" 2>&1 | tee "$E4L_OUT" || true
+    fi
 elif command -v enum4linux &>/dev/null; then
     cmd "enum4linux -a $TARGET"
     enum4linux -a "$TARGET" 2>&1 | tee "$E4L_OUT" || true

