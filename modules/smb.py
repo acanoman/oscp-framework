@@ -72,6 +72,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
     _parse_domain_info(smb_dir, session, log)
     _parse_signing(smb_dir, session, log)
     _parse_smbv1(smb_dir, session, log)
+    _parse_samba_version(smb_dir, session, log)
     _generate_spray_hints(session, log)
 
     log.info("SMB module complete.")
@@ -82,47 +83,60 @@ def run(target: str, session, dry_run: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 def _parse_shares(smb_dir: Path, session, log) -> None:
-    """Extract readable share names from smbmap and nxc output."""
+    """Extract readable share names and access levels from smbmap and nxc output."""
     shares: set = set()
+    share_access: dict = {}  # share_name → "READ ONLY" | "READ, WRITE"
 
     # smbmap null session — fixed-width columns, share name may contain spaces
     # Line format: "\t<ShareName (padded)>\t<Permissions>\t<Comment>"
     smbmap_file = smb_dir / "smbmap_null.txt"
     if smbmap_file.exists():
         for line in smbmap_file.read_text(errors="ignore").splitlines():
-            if re.search(r'READ ONLY|READ,\s*WRITE', line, re.IGNORECASE):
-                if re.search(r'IPC\$|print\$', line, re.IGNORECASE):
-                    continue
-                # Strip permissions suffix (2+ spaces before keyword) to capture
-                # share names that may include spaces (e.g. "Samantha Konstan")
-                stripped = re.sub(
-                    r'\s{2,}(?:READ ONLY|READ,\s*WRITE|NO ACCESS).*$', '',
-                    line, flags=re.IGNORECASE,
-                ).strip()
-                if stripped and not re.search(r'^-+$|Disk|Permissions', stripped):
-                    shares.add(stripped)
+            m_access = re.search(r'(READ ONLY|READ,\s*WRITE)', line, re.IGNORECASE)
+            if not m_access:
+                continue
+            if re.search(r'IPC\$|print\$', line, re.IGNORECASE):
+                continue
+            access_level = m_access.group(1).upper().replace("  ", " ")
+            # Strip permissions suffix to capture share names that may include spaces
+            stripped = re.sub(
+                r'\s{2,}(?:READ ONLY|READ,\s*WRITE|NO ACCESS).*$', '',
+                line, flags=re.IGNORECASE,
+            ).strip()
+            if stripped and not re.search(r'^-+$|Disk|Permissions', stripped):
+                shares.add(stripped)
+                share_access[stripped] = access_level
 
     # nxc shares (null + guest combined)
     # Line format: "SMB  IP  PORT  HOST  [+] <ShareName (padded)>  READ ONLY"
     nxc_file = smb_dir / "nxc_shares.txt"
     if nxc_file.exists():
         for line in nxc_file.read_text(errors="ignore").splitlines():
-            if re.search(r'\bREAD\b|\bWRITE\b', line, re.IGNORECASE):
-                if re.search(r'IPC\$|ACCESS_DENIED', line, re.IGNORECASE):
-                    continue
-                # Require [+] (not [*] status lines) then capture up to 2+ spaces
-                m = re.search(
-                    r'\[\+\]\s+([\w][\w\s._$-]*?)\s{2,}(?:READ|NO ACCESS|WRITE)',
-                    line, re.IGNORECASE,
-                )
-                if m:
-                    shares.add(m.group(1).strip())
+            m_access = re.search(r'(READ ONLY|READ,\s*WRITE)', line, re.IGNORECASE)
+            if not m_access:
+                continue
+            if re.search(r'IPC\$|ACCESS_DENIED', line, re.IGNORECASE):
+                continue
+            access_level = m_access.group(1).upper().replace("  ", " ")
+            # Require [+] (not [*] status lines) then capture up to 2+ spaces
+            m = re.search(
+                r'\[\+\]\s+([\w][\w\s._$-]*?)\s{2,}(?:READ|NO ACCESS|WRITE)',
+                line, re.IGNORECASE,
+            )
+            if m:
+                name = m.group(1).strip()
+                shares.add(name)
+                share_access.setdefault(name, access_level)
 
     if shares:
         new_shares = [s for s in sorted(shares) if s not in session.info.shares_found]
         session.info.shares_found.extend(new_shares)
         log.info("SMB shares found: %s", sorted(shares))
         session.add_note(f"SMB shares accessible: {sorted(shares)}")
+
+        # Record per-share access level for report table
+        for share, access in share_access.items():
+            session.add_note(f"SMB share '{share}' access: {access}")
 
         # Add manual smbclient commands for each readable share (dynamic, not hardcoded)
         ip = session.info.ip
@@ -136,17 +150,19 @@ def _parse_shares(smb_dir: Path, session, log) -> None:
             )
 
         # Infer potential usernames from share names.
-        # "Samantha Konstan" → ["samantha", "skonstan"]
-        # "john.doe"         → ["john.doe", "john"]
+        # "Samantha Konstan" → ["samantha", "konstan", "skonstan", "samanthakonstan"]
+        # "john.doe"         → ["john.doe", "john", "jdoe"]
         _inferred: set = set()
         for share in shares:
-            # Replace dots/underscores/hyphens/spaces and split on all separators
             parts = re.split(r'[\s._-]+', share.strip())
             parts = [p for p in parts if len(p) > 1 and p.isalpha()]
             if len(parts) >= 2:
                 first, last = parts[0].lower(), parts[-1].lower()
-                _inferred.add(first)                   # first name
-                _inferred.add(f"{first[0]}{last}")     # flast format
+                _inferred.add(first)                     # first name alone
+                _inferred.add(last)                      # last name alone
+                _inferred.add(f"{first[0]}{last}")       # f.last format
+                _inferred.add(f"{first}{last}")          # firstlast concatenated
+                _inferred.add(f"{first}.{last}")         # first.last format
             elif len(parts) == 1:
                 _inferred.add(parts[0].lower())
 
@@ -202,19 +218,25 @@ def _parse_users(smb_dir: Path, session, log) -> None:
             if m2:
                 users.add(m2.group(1))
 
-    # Filter out known Nmap/rpcclient output artefacts — NOT common nouns.
+    # Filter out known output artefacts — NOT usernames.
+    # Catches NXC status message words like "Enumerated" from lines such as:
+    #   [+] Enumerated unix users:  or  [+] Unix users:
     # Single-char tokens and blank strings are always dropped.
-    # Legitimate accounts like "user", "admin", "guest", "test" are kept.
     _noise = {
         "",
         # rpcclient column headers / field labels
         "account_name", "account_flags", "group_name", "group_flags",
         "full_name", "description", "logon_script", "profile_path",
         "comment", "parameters", "workstations",
-        # nxc artefacts
-        "memberof", "badpwdcount", "lastlogon",
+        # nxc / netexec status message words (appear on [+] / [*] lines)
+        "memberof", "badpwdcount", "lastlogon", "badpasswordcount",
+        "enumerated", "unix", "windows", "linux", "local", "domain",
+        "added", "adding", "starting", "started", "completed", "running",
+        "searching", "found", "checking", "testing", "skipping", "failed",
+        "error", "warning", "success", "info", "debug", "smb", "nxc",
+        "netexec", "crackmapexec", "extra", "share", "shares",
         # enum4linux section markers
-        "users", "groups", "password", "enabled", "disabled",
+        "users", "groups", "password", "enabled", "disabled", "true", "false",
     }
     users = {u for u in users if len(u) > 1 and u.lower() not in _noise}
 
@@ -339,6 +361,61 @@ def _parse_smbv1(smb_dir: Path, session, log) -> None:
             break
 
 
+def _parse_samba_version(smb_dir: Path, session, log) -> None:
+    """
+    Detect the Samba version from nmap/nxc/enum4linux output and add a
+    searchsploit hint.  Also checks for SambaCry (CVE-2017-7494) eligibility
+    (Samba < 4.6.4 with a writable share — the flag is advisory only).
+    """
+    samba_ver: str = ""
+
+    # Priority 1: port_details from nmap version scan
+    for port in (139, 445):
+        ver_str = session.info.port_details.get(port, {}).get("version", "") or ""
+        m = re.search(r'Samba\s+smbd?\s+([\d]+\.[\d]+\.?[\d]*)', ver_str, re.IGNORECASE)
+        if m:
+            samba_ver = m.group(1)
+            break
+
+    # Priority 2: scan output files
+    if not samba_ver:
+        for fname in ("nmap_smb.txt", "nxc_shares.txt", "enum4linux.txt"):
+            fpath = smb_dir / fname
+            if not fpath.exists():
+                continue
+            content = fpath.read_text(errors="ignore")
+            m = re.search(r'Samba\s+smbd?\s+([\d]+\.[\d]+\.?[\d]*)', content, re.IGNORECASE)
+            if m:
+                samba_ver = m.group(1)
+                break
+
+    if not samba_ver:
+        return
+
+    log.info("Samba version detected: %s", samba_ver)
+    ver_major_minor = ".".join(samba_ver.split(".")[:2])
+    session.add_note(
+        f"INFO: Samba {samba_ver} detected — research CVEs: "
+        f"searchsploit samba {ver_major_minor}"
+    )
+
+    # SambaCry (CVE-2017-7494): affects Samba < 4.6.4 with a writable share
+    try:
+        parts = [int(x) for x in samba_ver.split(".")]
+        major, minor = parts[0], parts[1] if len(parts) > 1 else 0
+        patch = parts[2] if len(parts) > 2 else 0
+        if major < 4 or (major == 4 and minor < 6) or (major == 4 and minor == 6 and patch < 4):
+            session.add_note(
+                f"HIGH: Samba {samba_ver} < 4.6.4 — potential SambaCry (CVE-2017-7494): "
+                f"searchsploit sambacry"
+            )
+            log.warning(
+                "Samba %s may be vulnerable to SambaCry (CVE-2017-7494)", samba_ver
+            )
+    except (ValueError, IndexError):
+        pass
+
+
 def _generate_spray_hints(session, log) -> None:
     """
     When users have been discovered, inject manual spray commands as notes.
@@ -362,7 +439,25 @@ def _generate_spray_hints(session, log) -> None:
     log.info("Spray hints added: %d users discovered — policy check + per-service commands",
              len(session.info.users_found))
 
-    # AS-REP Roasting — no creds needed, safe to run
+    # NTLM relay / capture — workgroup vs domain context
+    for note in session.info.notes:
+        if re.search(r'smb signing disabled|ntlm relay', note, re.IGNORECASE):
+            if domain:
+                session.add_note(
+                    f"[MANUAL] NTLM relay (domain target): "
+                    f"sudo responder -I tun0 -wd && "
+                    f"impacket-ntlmrelayx -t smb://{ip} -smb2support"
+                )
+            else:
+                # Workgroup: relay is harder — capture and crack hash offline
+                session.add_note(
+                    f"[MANUAL] NTLM capture (workgroup — no relay target): "
+                    f"sudo responder -I tun0 -wrf  "
+                    f"# then crack: hashcat -m 5600 <hash.txt> /usr/share/wordlists/rockyou.txt"
+                )
+            break
+
+    # AS-REP Roasting — only makes sense with a domain
     if domain:
         session.add_note(
             f"[MANUAL] AS-REP Roasting (no pre-auth accounts): "

@@ -258,7 +258,7 @@ PIVOT_TOOLS_LINUX: list = [
 # ---------------------------------------------------------------------------
 
 # Ports whose presence suggests this host is a proxy/VPN/gateway
-PIVOT_INDICATOR_PORTS: set = {1080, 1194, 3128, 8080}
+PIVOT_INDICATOR_PORTS: set = {1080, 1194, 3128, 1723, 4444, 9050}
 
 # Substrings in any discovered hostname that imply a routing/gateway role
 PIVOT_INDICATOR_HOSTNAMES: tuple = (

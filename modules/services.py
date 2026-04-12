@@ -157,6 +157,25 @@ def _parse_ssh(session, log) -> None:
             log.warning("SSH CVEs found: %s", unique_cves)
             session.add_note(f"HIGH: SSH CVEs detected: {unique_cves}")
 
+    # OpenSSH version → CVE-2018-15473 username enumeration (affects < 7.7)
+    # The version string comes from Nmap: "OpenSSH 7.4 protocol 2.0"
+    ssh_ver_str = session.info.port_details.get(22, {}).get("version", "") or ""
+    m_ver = re.search(r'OpenSSH\s+([\d]+)\.([\d]+)', ssh_ver_str, re.IGNORECASE)
+    if m_ver:
+        ssh_major, ssh_minor = int(m_ver.group(1)), int(m_ver.group(2))
+        ver_label = f"{ssh_major}.{ssh_minor}"
+        if ssh_major < 7 or (ssh_major == 7 and ssh_minor < 7):
+            log.warning(
+                "OpenSSH %s < 7.7 — CVE-2018-15473 username enumeration possible",
+                ver_label,
+            )
+            session.add_note(
+                f"HIGH: OpenSSH {ver_label} < 7.7 — CVE-2018-15473 username enumeration: "
+                f"use auxiliary/scanner/ssh/ssh_enumusers in Metasploit "
+                f"OR: python3 ssh_user_enum.py --userList {session.target_dir}/users.txt "
+                f"--ip {session.info.ip}"
+            )
+
     # Check which users have password auth enabled (nmap ssh-auth-methods)
     # Output format:
     #   22/tcp open ssh

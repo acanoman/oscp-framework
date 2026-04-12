@@ -243,10 +243,11 @@ def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
 
         # Flag high-value paths that often contain credentials or admin interfaces
         _HIGH_VALUE = re.compile(
-            r'/(backup[s_-]|\.git|\.svn|phpinfo|config|setup|install|admin'
+            r'/(backup[s_-]?|\.git|\.svn|phpinfo|config|setup|install|admin'
             r'|phpmyadmin|manager|console|dashboard|wp-admin|xmlrpc'
             r'|\.env|\.htpasswd|web\.config|passwd|shadow'
-            r'|backup_migrate|cron\.php|update\.php)',
+            r'|backup_migrate|cron\.php|update\.php'
+            r'|download[s]?|upload[s]?)',
             re.IGNORECASE,
         )
         for p in paths:
@@ -255,6 +256,22 @@ def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
                 if note not in session.info.notes:
                     session.add_note(note)
                     log.warning("High-value web path found: %s", p)
+
+        # README/LICENSE files often reveal the CMS or framework version
+        _INFO_FILES = re.compile(
+            r'/(README|LICENSE|CHANGELOG|VERSION|INSTALL|COPYING)(\.txt|\.md|\.html|$)',
+            re.IGNORECASE,
+        )
+        ip = session.info.ip
+        port_int = int(suffix.lstrip("_port")) if suffix and suffix.lstrip("_port").isdigit() else 80
+        proto = "https" if port_int in {443, 8443, 9443, 4443} else "http"
+        base = f"{proto}://{ip}" if port_int in {80, 443} else f"{proto}://{ip}:{port_int}"
+        for p in paths:
+            if _INFO_FILES.search(p):
+                note = f"[MANUAL] Inspect info file (may reveal CMS/framework version): curl -s '{base}{p}' | head -20"
+                if note not in session.info.notes:
+                    session.add_note(note)
+                    log.info("Info file found at %s — may reveal CMS version", p)
 
     if paths:
         new_paths = [p for p in sorted(paths) if p not in session.info.web_paths]
@@ -309,7 +326,18 @@ def _parse_whatweb(web_dir: Path, suffix: str, session, log) -> Optional[str]:
                 log.warning("Old Apache version detected: %s (port %s)", version_str, port_label)
                 session.add_note(
                     f"HIGH: Apache {version_str} on port {port_label} — "
-                    f"EOL/old version, check searchsploit apache {version_str}"
+                    f"EOL/old version, check: searchsploit apache {version_str}"
+                )
+            elif major == 2 and minor == 4 and patch < 30:
+                # 2.4.0–2.4.29: many public CVEs, released before 2017 security era
+                log.warning(
+                    "Old Apache 2.4.x detected: %s (port %s) — "
+                    "released pre-2017, many known CVEs",
+                    version_str, port_label,
+                )
+                session.add_note(
+                    f"HIGH: Apache {version_str} on port {port_label} — "
+                    f"old release (pre-2017), check: searchsploit apache {version_str}"
                 )
             elif major == 2 and minor == 4 and patch < 50:
                 log.info("Potentially outdated Apache 2.4.x: %s (port %s)", version_str, port_label)

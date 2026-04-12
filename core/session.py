@@ -589,6 +589,13 @@ class Session:
 
         # ── SMB Shares ────────────────────────────────────────────────
         if self.info.shares_found:
+            # Build access-level dict from notes written by _parse_shares()
+            _share_access: Dict[str, str] = {}
+            for _n in self.info.notes:
+                _m = re.search(r"SMB share '([^']+)' access:\s*(.+)$", _n)
+                if _m:
+                    _share_access[_m.group(1)] = _m.group(2).strip()
+
             lines += [
                 "## 📁 SMB Shares Found",
                 "",
@@ -596,7 +603,8 @@ class Session:
                 "|-------|--------|-------|",
             ]
             for share in self.info.shares_found:
-                lines.append(f"| `{share}` | — | — |")
+                access = _share_access.get(share, "—")
+                lines.append(f"| `{share}` | {access} | — |")
             lines.append("")
             lines += [
                 "> **Next step:** Connect to each readable share:",
@@ -678,8 +686,14 @@ class Session:
             "",
         ]
 
+        # AD-only ports — only include checklist if a domain was identified
+        _AD_ONLY_PORTS = {88, 389, 636, 3268, 3269}
+
         checklist_written = False
         for port in sorted(self.info.open_ports):
+            # Skip Kerberos/LDAP checklist items when no domain detected
+            if port in _AD_ONLY_PORTS and not self.info.domain:
+                continue
             items = _CHECKLIST.get(port)
             if not items:
                 continue
@@ -849,6 +863,42 @@ class Session:
                 ))
                 break
 
+        # OpenSSH < 7.7 username enumeration (CVE-2018-15473)
+        for note in self.info.notes:
+            if _once("ssh_userenum") and re.search(r'CVE-2018-15473', note):
+                m = re.search(r'OpenSSH ([\d.]+) < 7\.7', note)
+                ver = m.group(1) if m else "old"
+                steps.append((
+                    "high",
+                    f"OpenSSH {ver} — CVE-2018-15473 username enumeration",
+                    f"use auxiliary/scanner/ssh/ssh_enumusers  "
+                    f"# set RHOSTS {ip}; set USER_FILE {uf}; run",
+                ))
+                break
+
+        # SambaCry critical
+        for note in self.info.notes:
+            if _once("sambacry") and re.search(r'SambaCry|CVE-2017-7494', note):
+                m = re.search(r'Samba ([\d.]+)', note)
+                ver = m.group(1) if m else ""
+                steps.append((
+                    "critical",
+                    f"Samba {ver} — potential SambaCry (CVE-2017-7494)",
+                    f"searchsploit sambacry",
+                ))
+                break
+
+        # NSE vuln scan CRITICAL findings (CVEs found in vulns.txt)
+        for note in self.info.notes:
+            if _once("nse_crit") and re.search(r'CRITICAL: NSE vuln scan', note):
+                clean = re.sub(r'^\[\d{2}:\d{2}:\d{2}\] ', '', note)
+                steps.append((
+                    "critical",
+                    "NSE background vuln scan flagged CVEs — review scans/vulns.txt",
+                    f"cat {self.target_dir}/scans/vulns.txt | grep -E 'VULNERABLE|CVE-'",
+                ))
+                break
+
         # ── HIGH ─────────────────────────────────────────────────────────────
 
         # Readable SMB shares
@@ -925,6 +975,30 @@ class Session:
                     f"wget '{url}' -O /tmp/loot_file && file /tmp/loot_file && strings /tmp/loot_file | grep -i pass",
                 ))
 
+        # Apache old version → searchsploit
+        for note in self.info.notes:
+            m = re.search(r'HIGH: Apache ([\d.]+) on port (\d+)', note)
+            if m and _once(f"apache_{m.group(1)}"):
+                ver = m.group(1)
+                ver_mm = ".".join(ver.split(".")[:2])
+                steps.append((
+                    "high",
+                    f"Apache {ver} (old) — check public exploits",
+                    f"searchsploit apache {ver}\nsearchsploit apache {ver_mm}",
+                ))
+
+        # Samba version → searchsploit (medium — may have CVEs)
+        for note in self.info.notes:
+            m = re.search(r'INFO: Samba ([\d.]+) detected', note)
+            if m and _once(f"samba_{m.group(1)}"):
+                ver = m.group(1)
+                ver_mm = ".".join(ver.split(".")[:2])
+                steps.append((
+                    "medium",
+                    f"Samba {ver} — research known CVEs",
+                    f"searchsploit samba {ver}\nsearchsploit samba {ver_mm}",
+                ))
+
         # Database misconfigs
         for note in self.info.notes:
             if _once("db_empty") and re.search(r'database:.*(?:empty password|unauthenticated)', note, re.I):
@@ -954,7 +1028,7 @@ class Session:
                     f"-usersfile {uf} -format hashcat "
                     f"-outputfile {ldap_dir}/asrep_hashes.txt",
                 ))
-                if 88 in self.info.open_ports:
+                if 88 in self.info.open_ports and domain:
                     steps.append((
                         "medium",
                         "Kerbrute — validate users via Kerberos (no 4625 event, no lockout)",

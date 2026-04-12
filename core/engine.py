@@ -728,6 +728,9 @@ class Engine:
             self._vuln_pid = None
             vuln_out   = self.session.path("scans", "vulns.txt")
 
+            # Parse vulns.txt immediately and surface CVEs / VULNERABLE hits as notes
+            self._parse_vuln_scan_output(vuln_out)
+
             self.console.print()
             self.console.rule(
                 "[bold yellow] 🔔  DING!  Background NSE Vuln Scan Finished  🔔 [/bold yellow]",
@@ -748,6 +751,49 @@ class Engine:
             # Process exists but owned by a different UID, or platform doesn't
             # support kill(0) the same way — skip silently.
             pass
+
+    def _parse_vuln_scan_output(self, vuln_file) -> None:
+        """
+        Parse the NSE vuln scan output file (scans/vulns.txt) for CVE references
+        and VULNERABLE keyword lines.  Surfaces findings as CRITICAL/HIGH notes so
+        they appear in the attack path and report sections automatically.
+
+        Called immediately when the background scan process exits.
+        """
+        from pathlib import Path as _Path
+        vuln_path = _Path(vuln_file) if not hasattr(vuln_file, "read_text") else vuln_file
+        if not vuln_path.exists() or vuln_path.stat().st_size == 0:
+            return
+
+        try:
+            content = vuln_path.read_text(errors="ignore", encoding="utf-8")
+        except OSError:
+            return
+
+        # Extract all CVE references
+        cves = sorted(set(re.findall(r'CVE-\d{4}-\d+', content)))
+        if cves:
+            self.session.add_note(f"CRITICAL: NSE vuln scan CVEs found: {cves[:15]}")
+            warn(f"NSE vuln scan — CVEs found: {', '.join(cves[:10])}")
+            self.log.warning("NSE vuln scan found CVEs: %s", cves)
+
+        # Extract VULNERABLE keyword lines (nmap formats them with | prefix)
+        vuln_lines = []
+        for line in content.splitlines():
+            stripped = line.strip().lstrip("|").strip()
+            if re.search(r'\bVULNERABLE\b', stripped, re.IGNORECASE) and stripped:
+                vuln_lines.append(stripped[:120])
+
+        for vline in vuln_lines[:8]:
+            note = f"CRITICAL: NSE vuln scan: {vline}"
+            if note not in self.session.info.notes:
+                self.session.add_note(note)
+                warn(f"NSE: {vline}")
+
+        if cves or vuln_lines:
+            self.log.info(
+                "vulns.txt parsed: %d CVEs, %d VULNERABLE lines", len(cves), len(vuln_lines)
+            )
 
     def _resolve_modules(self) -> List[str]:
         """
