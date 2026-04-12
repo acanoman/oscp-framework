@@ -303,6 +303,7 @@ class Engine:
         forced_modules: Optional[List[str]] = None,
         lhost:          str         = "",
         resume:         bool        = False,
+        tui_queue=None,             # ARGUS-TUI integration
     ) -> None:
         self.target         = target
         self.domain         = domain
@@ -311,6 +312,7 @@ class Engine:
         self.forced_modules = forced_modules or []
         self.lhost          = lhost
         self.resume         = resume
+        self._tui_queue     = tui_queue  # ARGUS-TUI integration
 
         # Timing — set at the start of _run_inner()
         self._run_start: float = 0.0
@@ -325,6 +327,26 @@ class Engine:
         self.info: TargetInfo = self.session.info
         self.log        = self.session.log
         self.recommender = Recommender(self.info, self.log, self.console)
+
+    # ------------------------------------------------------------------
+    # ARGUS-TUI integration — helpers to push messages into the TUI queue
+    # ------------------------------------------------------------------
+
+    def _tui_put(self, msg) -> None:
+        """Non-blocking push to the TUI queue; no-op if TUI is not active."""
+        # ARGUS-TUI integration
+        if self._tui_queue is not None:
+            self._tui_queue.put(msg)
+
+    def _tui_module_status(self, module: str, state: str) -> None:
+        """Notify the TUI of a module state transition."""
+        # ARGUS-TUI integration
+        self._tui_put({"type": "module_status", "module": module, "state": state})
+
+    def _tui_log(self, line: str) -> None:
+        """Send a plain log line to the TUI live output panel."""
+        # ARGUS-TUI integration
+        self._tui_put(line)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -548,6 +570,10 @@ class Engine:
         self.log.info("PHASE 1 — Initial Nmap Recon")
         self.log.info("=" * 60)
 
+        # ARGUS-TUI integration — mark RECON as running in sidebar
+        self._tui_module_status("recon", "running")
+        self._tui_log("[-] Starting initial Nmap recon scan...")
+
         script = WRAPPERS_DIR / "recon.sh"
 
         cmd = [
@@ -575,6 +601,12 @@ class Engine:
             self.session.add_note(
                 f"Nmap found ports: {sorted(self.info.open_ports)}"
             )
+            # ARGUS-TUI integration — report discovered ports to live output
+            self._tui_log(
+                f"[+] RECON complete — {len(self.info.open_ports)} port(s) open: "
+                f"{sorted(self.info.open_ports)}"
+            )
+            self._tui_module_status("recon", "done")
 
             # Auto-detect Domain Controller from port fingerprint:
             # Kerberos (88) + any LDAP variant is a near-certain DC indicator.
@@ -762,11 +794,16 @@ class Engine:
         self.console.rule(f"[bold blue] MODULE — {module_name.upper()} [/bold blue]")
         self.log.info("MODULE — %s", module_name.upper())
 
+        # ARGUS-TUI integration — mark module as running in the sidebar
+        self._tui_module_status(module_name, "running")
+
         if module_name not in MODULE_REGISTRY:
             self.console.print(
                 f"  [bold red][✗][/bold red] Unknown module: [yellow]{module_name}[/yellow]"
             )
             self.log.error("Unknown module '%s' — skipping.", module_name)
+            # ARGUS-TUI integration — unknown module stays pending; log the skip
+            self._tui_log(f"[!] Unknown module '{module_name}' — skipped")
             return
 
         try:
@@ -784,14 +821,27 @@ class Engine:
                 target=self.target,
                 session=self.session,
                 dry_run=self.dry_run,
+                tui_queue=self._tui_queue,   # ARGUS-TUI integration
+            )
+        except TypeError:
+            # Older module signatures don't accept tui_queue — call without it
+            mod.run(
+                target=self.target,
+                session=self.session,
+                dry_run=self.dry_run,
             )
         except Exception as exc:
             self.console.print(
                 f"  [bold red][✗][/bold red] Module [yellow]{module_name}[/yellow] failed: {exc}"
             )
             self.log.error("Module '%s' failed: %s", module_name, exc)
+            # ARGUS-TUI integration — log failure to live output
+            self._tui_log(f"[!] Module {module_name.upper()} failed: {exc}")
             if self.verbose:
                 raise
+
+        # ARGUS-TUI integration — mark module done after run() returns
+        self._tui_module_status(module_name, "done")
 
     # ------------------------------------------------------------------
     # Command execution

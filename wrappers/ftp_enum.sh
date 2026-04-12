@@ -96,7 +96,9 @@ cmd "nmap -p${FTP_PORT} --script ftp-anon,ftp-bounce,ftp-syst,ftp-vsftpd-backdoo
 nmap -p"${FTP_PORT}" \
     --script 'ftp-anon,ftp-bounce,ftp-syst,ftp-vsftpd-backdoor' \
     -Pn "$TARGET" \
-    -oN "${FTP_DIR}/ftp_nmap.txt" 2>&1 | tee "${FTP_DIR}/ftp_nmap.txt" || true
+    -oN "${FTP_DIR}/ftp_nmap.txt" 2>&1 | tee "${FTP_DIR}/ftp_nmap.txt" || {
+    warn "nmap (FTP) failed — output may be incomplete. Check ${FTP_DIR}/ftp_nmap.txt for details."
+} # IMP-7 applied
 
 if grep -qi "vsftpd.*backdoor\|VULNERABLE" "${FTP_DIR}/ftp_nmap.txt" 2>/dev/null; then
     warn "vsftpd BACKDOOR detected — review ${FTP_DIR}/ftp_nmap.txt"

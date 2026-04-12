@@ -102,7 +102,9 @@ if has_port 21; then
     nmap -p21 \
         --script 'ftp-anon,ftp-bounce,ftp-syst,ftp-vsftpd-backdoor' \
         -Pn "$TARGET" \
-        -oN "${FTP_DIR}/nmap_ftp.txt" 2>&1 | tee "${FTP_DIR}/nmap_ftp.txt" || true
+        -oN "${FTP_DIR}/nmap_ftp.txt" 2>&1 | tee "${FTP_DIR}/nmap_ftp.txt" || {
+        warn "nmap (FTP) failed — output may be incomplete. Check ${FTP_DIR}/nmap_ftp.txt for details."
+    } # IMP-7 applied
 
     # Flag vsftpd backdoor
     if grep -qi "vsftpd.*backdoor\|VULNERABLE" "${FTP_DIR}/nmap_ftp.txt" 2>/dev/null; then
@@ -215,7 +217,9 @@ if has_port 23; then
     nmap -p23 \
         --script 'telnet-ntlm-info,telnet-encryption' \
         -Pn "$TARGET" \
-        -oN "${TELNET_DIR}/telnet_nmap.txt" 2>&1 | tee "${TELNET_DIR}/telnet_nmap.txt" || true
+        -oN "${TELNET_DIR}/telnet_nmap.txt" 2>&1 | tee "${TELNET_DIR}/telnet_nmap.txt" || {
+        warn "nmap (Telnet) failed — output may be incomplete. Check ${TELNET_DIR}/telnet_nmap.txt for details."
+    } # IMP-7 applied
 
     if grep -qi "Target_Name\|NetBIOS\|Domain_Name" "${TELNET_DIR}/telnet_nmap.txt" 2>/dev/null; then
         ok "Telnet NTLM info disclosure — hostname/domain extracted (check telnet_nmap.txt)"
@@ -241,7 +245,9 @@ if has_port 25; then
     nmap -p25 \
         --script 'smtp-commands,smtp-enum-users,smtp-vuln*' \
         -Pn "$TARGET" \
-        -oN "${SMTP_DIR}/nmap_smtp.txt" 2>&1 | tee "${SMTP_DIR}/nmap_smtp.txt" || true
+        -oN "${SMTP_DIR}/nmap_smtp.txt" 2>&1 | tee "${SMTP_DIR}/nmap_smtp.txt" || {
+        warn "nmap (SMTP) failed — output may be incomplete. Check ${SMTP_DIR}/nmap_smtp.txt for details."
+    } # IMP-7 applied
 
     # smtp-user-enum — prefer existing user lists from prior modules (smb/ldap)
     # to avoid generic wordlists and reduce noise.
@@ -309,7 +315,9 @@ if has_port 53; then
     nmap -p53 \
         --script 'dns-nsid,dns-recursion,dns-service-discovery' \
         -Pn "$TARGET" \
-        -oN "${DNS_DIR}/dns_nmap.txt" 2>&1 | tee "${DNS_DIR}/dns_nmap.txt" || true
+        -oN "${DNS_DIR}/dns_nmap.txt" 2>&1 | tee "${DNS_DIR}/dns_nmap.txt" || {
+        warn "nmap (DNS) failed — output may be incomplete. Check ${DNS_DIR}/dns_nmap.txt for details."
+    } # IMP-7 applied
 
     if grep -qi "dns-recursion.*Recursion.*enabled\|Recursion: enabled" \
         "${DNS_DIR}/dns_nmap.txt" 2>/dev/null; then
@@ -412,7 +420,9 @@ if has_port 135; then
     nmap -p135 \
         --script 'msrpc-enum' \
         -Pn "$TARGET" \
-        -oN "${MSRPC_DIR}/msrpc_nmap.txt" 2>&1 | tee "${MSRPC_DIR}/msrpc_nmap.txt" || true
+        -oN "${MSRPC_DIR}/msrpc_nmap.txt" 2>&1 | tee "${MSRPC_DIR}/msrpc_nmap.txt" || {
+        warn "nmap (MSRPC) failed — output may be incomplete. Check ${MSRPC_DIR}/msrpc_nmap.txt for details."
+    } # IMP-7 applied
 
     # impacket-rpcdump — dumps all registered RPC endpoints anonymously
     if command -v impacket-rpcdump &>/dev/null; then
@@ -604,7 +614,9 @@ if echo ",$PORTS," | grep -qP ',(143|110|993|995),'; then
     nmap -p"$IMAP_PORT" \
         --script 'imap-capabilities,imap-ntlm-info' \
         -Pn "$TARGET" \
-        -oN "${MAIL_DIR}/nmap_imap.txt" 2>&1 | tee "${MAIL_DIR}/nmap_imap.txt" || true
+        -oN "${MAIL_DIR}/nmap_imap.txt" 2>&1 | tee "${MAIL_DIR}/nmap_imap.txt" || {
+        warn "nmap (IMAP) failed — output may be incomplete. Check ${MAIL_DIR}/nmap_imap.txt for details."
+    } # IMP-7 applied
 
     if grep -qi "Target_Name\|NetBIOS" "${MAIL_DIR}/nmap_imap.txt" 2>/dev/null; then
         ok "IMAP NTLM info disclosure — hostname/domain may be in output"
@@ -639,7 +651,9 @@ if has_port 3389; then
     nmap -p3389 \
         --script 'rdp-enum-encryption,rdp-vuln-ms12-020' \
         -Pn "$TARGET" \
-        -oN "${REMOTE_DIR}/rdp_nmap.txt" 2>&1 | tee "${REMOTE_DIR}/rdp_nmap.txt" || true
+        -oN "${REMOTE_DIR}/rdp_nmap.txt" 2>&1 | tee "${REMOTE_DIR}/rdp_nmap.txt" || {
+        warn "nmap (RDP) failed — output may be incomplete. Check ${REMOTE_DIR}/rdp_nmap.txt for details."
+    } # IMP-7 applied
 
     # NXC rapid identification — reveals hostname, domain, OS build,
     # SMB signing state, and sometimes NLA requirement in one line.
@@ -678,7 +692,9 @@ if echo ",$PORTS," | grep -qP ',(5985|5986),'; then
     nmap -p5985,5986 \
         --script 'http-auth' \
         -Pn "$TARGET" \
-        -oN "${REMOTE_DIR}/winrm_nmap.txt" 2>&1 | tee "${REMOTE_DIR}/winrm_nmap.txt" || true
+        -oN "${REMOTE_DIR}/winrm_nmap.txt" 2>&1 | tee "${REMOTE_DIR}/winrm_nmap.txt" || {
+        warn "nmap (WinRM) failed — output may be incomplete. Check ${REMOTE_DIR}/winrm_nmap.txt for details."
+    } # IMP-7 applied
 
     # NXC rapid WinRM identification
     NXC_BIN=""

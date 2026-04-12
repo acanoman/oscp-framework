@@ -115,7 +115,9 @@ fi
 info "[3/5] Nmap OS fingerprint + traceroute"
 cmd "nmap --traceroute -O -Pn -n --top-ports 10 $TARGET"
 nmap --traceroute -O -Pn -n --top-ports 10 "$TARGET" \
-    -oN "${NET_DIR}/nmap_topology.txt" 2>&1 | tee "${NET_DIR}/nmap_topology.txt" || true
+    -oN "${NET_DIR}/nmap_topology.txt" 2>&1 | tee "${NET_DIR}/nmap_topology.txt" || {
+    warn "nmap (OS fingerprint) failed — output may be incomplete. Check ${NET_DIR}/nmap_topology.txt for details."
+} # IMP-7 applied
 
 OS_MATCH=$(grep -iE "OS details:|Running:" "${NET_DIR}/nmap_topology.txt" 2>/dev/null | head -2 || true)
 [[ -n "$OS_MATCH" ]] && ok "Nmap OS: ${WHITE}${OS_MATCH}${NC}"

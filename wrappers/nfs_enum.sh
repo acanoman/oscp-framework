@@ -84,7 +84,9 @@ cmd "nmap -p111,2049 --script nfs-ls,nfs-showmount,nfs-statfs,rpcinfo -Pn $TARGE
 nmap -p111,2049 \
     --script 'nfs-ls,nfs-showmount,nfs-statfs,rpcinfo' \
     -Pn "$TARGET" \
-    -oN "${NFS_DIR}/nfs_nmap.txt" 2>&1 | tee "${NFS_DIR}/nfs_nmap.txt" || true
+    -oN "${NFS_DIR}/nfs_nmap.txt" 2>&1 | tee "${NFS_DIR}/nfs_nmap.txt" || {
+    warn "nmap (NFS) failed — output may be incomplete. Check ${NFS_DIR}/nfs_nmap.txt for details."
+} # IMP-7 applied
 
 if grep -qi "no_root_squash" "${NFS_DIR}/nfs_nmap.txt" 2>/dev/null; then
     warn "NFS: no_root_squash detected — SUID binary plant via local-root mount is a PrivEsc path"

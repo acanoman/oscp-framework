@@ -97,8 +97,12 @@ def run(target: str, session, dry_run: bool = False) -> None:
     # and surfaces them in notes.md for immediate AS-REP Roasting follow-up.
     _parse_kerbrute_output(ldap_dir, session, log)
 
-    # Check whether the kill-chain fired and hashes were captured
-    _check_asreproast_hashes(ldap_dir, session, log)
+    # OSCP+ COMPLIANT — manual only
+    # _check_for_existing_hash_files() is intentionally not called here.
+    # The automated kill chain that wrote asreproast.hashes has been removed
+    # from ldap_enum.sh. Call this function manually if you ran GetNPUsers
+    # outside the framework and want to parse the resulting hash file.
+    # _check_for_existing_hash_files(ldap_dir, session, log)  # IMP-5 applied
 
     log.info("LDAP module complete.")
 
@@ -262,13 +266,13 @@ def _parse_kerbrute_output(ldap_dir: Path, session, log) -> None:
     )
 
 
-def _check_asreproast_hashes(ldap_dir: Path, session, log) -> None:
+def _check_for_existing_hash_files(ldap_dir: Path, session, log) -> None:  # IMP-5 applied
     """
-    Check whether the kill-chain wrapper captured AS-REP hashes.
+    Check whether AS-REP hash files exist from a previous manual run.
 
-    If asreproast.hashes exists and has content, fire a RED ALERT panel
-    to the terminal and record the hashes in session state so advisor.py
-    can emit the exact crack command.
+    If asreproast.hashes exists and has content, display a neutral
+    informational panel and record the path in session state so advisor.py
+    can reference it.
     """
     hash_file = ldap_dir / "asreproast.hashes"
     if not hash_file.exists() or hash_file.stat().st_size == 0:
@@ -280,7 +284,7 @@ def _check_asreproast_hashes(ldap_dir: Path, session, log) -> None:
         return
 
     hash_count = len(lines)
-    log.warning("AS-REP HASHES CAPTURED: %d hash(es) in %s", hash_count, hash_file)
+    log.info("Hash file detected (from a previous manual run): %d hash(es) in %s", hash_count, hash_file)
 
     # Mark on session so advisor.py knows hashes exist
     session.info.ntlm_hashes_found = True  # reuse existing flag — triggers PTH section too
@@ -289,7 +293,9 @@ def _check_asreproast_hashes(ldap_dir: Path, session, log) -> None:
         session.info.asreproast_hash_file = str(hash_file)
 
     session.add_note(
-        f"🔴 AS-REP HASHES CAPTURED ({hash_count} hash(es)) → {hash_file}\n"
+        f"📄 Hash files found (from a previous manual run): {hash_count} hash(es) → {hash_file}\n"
+        f"   Hash files detected at {hash_file}. These were not captured by this framework.\n"
+        f"   If you ran impacket-GetNPUsers manually, review and crack these files manually if applicable.\n"
         f"   hashcat -m 18200 {hash_file} /usr/share/wordlists/rockyou.txt "
         f"-r /usr/share/john/rules/best64.rule"
     )
@@ -298,14 +304,17 @@ def _check_asreproast_hashes(ldap_dir: Path, session, log) -> None:
     console.print()
     console.print(
         Panel(
-            f"[bold white]{hash_count} AS-REP HASH(ES) CAPTURED[/bold white]\n\n"
+            f"[bold white]{hash_count} hash file(s) detected[/bold white]\n\n"
             f"[bold yellow]File:[/bold yellow] [cyan]{hash_file}[/cyan]\n\n"
-            f"[bold yellow]Crack now:[/bold yellow]\n"
-            f"[bold white]hashcat -m 18200 {hash_file} \\\n"
+            f"[dim]Hash files detected at {hash_file}. These were not captured\n"
+            f"by this framework. If you ran impacket-GetNPUsers manually,\n"
+            f"review and crack these files manually if applicable.[/dim]\n\n"
+            f"[bold yellow]Crack command:[/bold yellow]\n"
+            f"[white]hashcat -m 18200 {hash_file} \\\n"
             f"    /usr/share/wordlists/rockyou.txt \\\n"
-            f"    -r /usr/share/john/rules/best64.rule[/bold white]",
-            title="[bold red blink] !!!  AS-REP ROAST — HASHES ON DISK  !!! [/bold red blink]",
-            border_style="bold red",
+            f"    -r /usr/share/john/rules/best64.rule[/white]",
+            title="[bold blue] 📄  Hash files found (from a previous manual run) [/bold blue]",
+            border_style="blue",
             padding=(1, 4),
         )
     )

