@@ -153,14 +153,31 @@ if has_port 22; then
 
     if command -v ssh-audit &>/dev/null; then
         SSH_AUDIT_OUT="${OUTPUT_DIR}/ssh/ssh_audit.txt"
-        cmd "ssh-audit $TARGET"
-        ssh-audit "$TARGET" 2>&1 | tee "$SSH_AUDIT_OUT" || true
+        cmd "ssh-audit --skip-rate-test $TARGET"
+        # Save full output to file for later reference
+        ssh-audit --skip-rate-test "$TARGET" > "$SSH_AUDIT_OUT" 2>&1 || true
+
+        # Print only the signal lines to the terminal — skip algorithm noise
+        # (kex/enc/mac/key info lines and rec/nfo advisory lines).
+        # Keep: (gen) banner, (fin) fingerprints, fail/warn lines with CVE.
+        echo ""
+        info "[SSH-AUDIT] Summary (full output → ${SSH_AUDIT_OUT})"
+        grep -E '^\(gen\)|^\(fin\)|\[fail\].*CVE-|\[warn\].*CVE-|\[fail\].*broken|\[fail\].*deprecated' \
+            "$SSH_AUDIT_OUT" 2>/dev/null \
+            | sed 's/^\(gen\)/  (gen)/' \
+            | sed 's/^\(fin\)/  (fin)/' \
+            | while IFS= read -r line; do
+                echo "  $line"
+              done || true
 
         if grep -qiE 'CVE-' "$SSH_AUDIT_OUT" 2>/dev/null; then
             SSH_CVES=$(grep -oP 'CVE-\d+-\d+' "$SSH_AUDIT_OUT" 2>/dev/null \
                 | sort -u | head -5 | tr '\n' ' ' || true)
             warn "SSH CVEs found: ${RED}${SSH_CVES}${NC}"
+        else
+            ok "No CVEs flagged by ssh-audit"
         fi
+        echo ""
     else
         skip "ssh-audit"
         hint "Install ssh-audit:  pip3 install ssh-audit"

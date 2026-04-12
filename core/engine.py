@@ -31,7 +31,19 @@ from rich.panel import Panel
 from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
-from core.display import module_start, module_done, info, success, warn, error
+from core.display import module_start, module_done, info, pipe, success, warn, error, findings_panel
+
+
+# ---------------------------------------------------------------------------
+# ANSI stripping — bash wrappers emit color codes that must be removed before
+# pattern matching so prefixes like [+] / [!] are detected reliably.
+# ---------------------------------------------------------------------------
+
+_ANSI_RE = re.compile(r'\x1b(?:\[[0-9;]*[A-Za-z]|\([A-Za-z])')
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +791,9 @@ class Engine:
             self.log.error("Cannot import module '%s': %s", module_name, exc)
             return
 
+        # Snapshot note count so we can diff after the module runs
+        notes_before = len(self.session.info.notes)
+
         try:
             mod.run(
                 target=self.target,
@@ -794,6 +809,61 @@ class Engine:
                 raise
 
         module_done(module_name.upper())
+
+        # Print key findings from this module's new notes
+        new_notes = self.session.info.notes[notes_before:]
+        self._print_module_findings(module_name, new_notes)
+
+    def _print_module_findings(self, module_name: str, new_notes: list) -> None:
+        """
+        Distil newly added session notes into a findings panel.
+
+        Classifies each note by severity based on keyword matches so the
+        operator gets a clean "what matters" summary without reading raw
+        tool output.
+        """
+        findings = []
+
+        _CRITICAL_KW = (
+            "signing disabled", "ntlm relay", "vulnerable", "cve-",
+            "no_root_squash", "unauthenticated rce", "backdoor",
+        )
+        _HIGH_KW = (
+            "ssh cve", "password auth", "empty password", "weak",
+            "anonymous ftp", "anonymous smb", "eternalblue",
+        )
+        _ACCESS_KW = (
+            "anonymous", "null session", "anon login", "guest login",
+            "readable share", "read, write", "read only", "permitted",
+            "pong", "pwn3d", "login ok",
+        )
+
+        for raw_note in new_notes:
+            # Strip timestamp prefix "[HH:MM:SS] " for display
+            note = raw_note
+            if note.startswith("[") and "]" in note[:10]:
+                note = note.split("] ", 1)[-1]
+
+            low = note.lower()
+
+            # Skip noise: pure scan-status lines and non-finding notes
+            skip_kw = ("nmap found ports", "os guess via ttl", "module", "phase")
+            if any(sk in low for sk in skip_kw):
+                continue
+
+            if any(kw in low for kw in _CRITICAL_KW):
+                findings.append(("critical", note))
+            elif any(kw in low for kw in _HIGH_KW):
+                findings.append(("high", note))
+            elif any(kw in low for kw in _ACCESS_KW):
+                findings.append(("access", note))
+            elif any(kw in low for kw in (
+                "found", "discovered", "share", "user", "domain",
+                "hostname", "export", "san", "path",
+            )):
+                findings.append(("info", note))
+
+        findings_panel(module_name, findings)
 
     # ------------------------------------------------------------------
     # Command execution
@@ -842,17 +912,46 @@ class Engine:
                     start_new_session=True,
                 )
                 for raw_line in proc.stdout:  # type: ignore[union-attr]
-                    line = raw_line.strip()
-                    if line:
-                        if line.startswith("[+]"):
-                            success(line[3:].strip())
-                        elif line.startswith("[!]"):
-                            warn(line[3:].strip())
-                        elif line.startswith("[-]"):
-                            info(line[3:].strip())
-                        else:
-                            info(line)
-                        self.log.debug("exec: %s", line)
+                    # Strip ANSI codes so prefix detection works on bash output
+                    line = _strip_ansi(raw_line).strip()
+                    if not line:
+                        continue
+                    # Bash wrappers indent their output with 2 spaces; strip
+                    # that so we can match the prefix character cleanly.
+                    stripped = line.lstrip()
+                    if stripped.startswith("[+]"):
+                        success(stripped[3:].strip())
+                    elif stripped.startswith("[!]"):
+                        warn(stripped[3:].strip())
+                    elif stripped.startswith("[-]"):
+                        # Actual negative/error from the wrapper
+                        from rich.markup import escape as _esc
+                        self.console.print(
+                            f"  [red][-][/red] [dim]{_esc(stripped[3:].strip())}[/dim]"
+                        )
+                    elif stripped.startswith("[*]"):
+                        info(stripped[3:].strip())
+                    elif stripped.startswith("[CMD]"):
+                        from rich.markup import escape as _esc
+                        self.console.print(
+                            f"  [dim yellow][CMD][/dim yellow] "
+                            f"[dim]{_esc(stripped[5:].strip())}[/dim]"
+                        )
+                    elif stripped.startswith("[MANUAL]"):
+                        from rich.markup import escape as _esc
+                        self.console.print(
+                            f"  [magenta][MANUAL][/magenta] "
+                            f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
+                        )
+                    elif stripped.startswith("[SKIP]"):
+                        from rich.markup import escape as _esc
+                        self.console.print(
+                            f"  [dim][SKIP][/dim] {_esc(stripped[6:].strip())}"
+                        )
+                    else:
+                        # Plain tool output (nmap, smbclient, etc.) — dim, no prefix
+                        pipe(line)
+                    self.log.debug("exec: %s", line)
                 proc.wait()
                 last_rc = proc.returncode if proc.returncode is not None else 0
 

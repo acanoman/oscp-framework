@@ -112,6 +112,35 @@ def _parse_shares(smb_dir: Path, session, log) -> None:
         log.info("SMB shares found: %s", sorted(shares))
         session.add_note(f"SMB shares accessible: {sorted(shares)}")
 
+        # Infer potential usernames from share names.
+        # "Samantha Konstan" → ["samantha", "skonstan"]
+        # "john.doe"         → ["john.doe", "john"]
+        _inferred: set = set()
+        for share in shares:
+            # Replace dots/underscores/hyphens with spaces then split on spaces
+            parts = re.split(r'[\s._-]+', share.strip())
+            parts = [p for p in parts if len(p) > 1 and p.isalpha()]
+            if len(parts) >= 2:
+                first, last = parts[0].lower(), parts[-1].lower()
+                _inferred.add(first)                   # first name
+                _inferred.add(f"{first[0]}{last}")     # flast format
+            elif len(parts) == 1:
+                _inferred.add(parts[0].lower())
+
+        # Filter out noise tokens that aren't real usernames
+        _noise_tokens = {"backup", "backups", "share", "data", "files",
+                         "public", "common", "recycler", "temp", "admin"}
+        _inferred -= _noise_tokens
+
+        new_inferred = [u for u in sorted(_inferred)
+                        if u not in session.info.users_found]
+        if new_inferred:
+            session.info.users_found.extend(new_inferred)
+            log.info("Potential usernames inferred from share names: %s", new_inferred)
+            session.add_note(
+                f"Potential usernames (inferred from share names): {new_inferred}"
+            )
+
 
 def _parse_users(smb_dir: Path, session, log) -> None:
     """Extract user accounts from rpcclient and nxc output."""
