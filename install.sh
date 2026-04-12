@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  install.sh — OSCP Framework Setup
-#  Makes all wrappers executable and verifies required tools are present.
+#  Makes all wrappers executable, creates a Python venv, installs pip deps,
+#  creates run.sh launcher, and verifies required tools are present.
 #
-#  Usage: bash install.sh
+#  Usage: sudo bash install.sh
 # =============================================================================
 set -uo pipefail
 
@@ -118,6 +119,55 @@ fi
 echo ""
 
 # ===========================================================================
+# 3b — Create virtualenv and install pip dependencies
+# ===========================================================================
+info "Setting up Python virtual environment at .venv/ ..."
+
+VENV_DIR="${SCRIPT_DIR}/.venv"
+VENV_PYTHON="${VENV_DIR}/bin/python"
+VENV_PIP="${VENV_DIR}/bin/pip"
+
+# Ensure python3-venv is available
+if ! python3 -m venv --help &>/dev/null; then
+    info "Installing python3-venv via apt..."
+    sudo apt-get install -y python3-venv &>/dev/null
+fi
+
+# Create the venv (idempotent — safe to re-run)
+if python3 -m venv "${VENV_DIR}"; then
+    ok "Virtual environment created at .venv/"
+else
+    err "Failed to create virtual environment — aborting pip install."
+fi
+
+# Install pip requirements into the venv
+if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
+    if "${VENV_PIP}" install -q -r "${SCRIPT_DIR}/requirements.txt"; then
+        ok "pip requirements installed into .venv/"
+    else
+        err "pip install failed — check requirements.txt and try again."
+    fi
+else
+    warn "requirements.txt not found — skipping pip install."
+fi
+echo ""
+
+# ===========================================================================
+# 3c — Write run.sh launcher
+# ===========================================================================
+info "Writing run.sh launcher..."
+cat > "${SCRIPT_DIR}/run.sh" << 'RUNSCRIPT'
+#!/usr/bin/env bash
+# run.sh — Launch the OSCP framework using the project virtualenv.
+# Usage: ./run.sh --target <IP> [options]
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/main.py" "$@"
+RUNSCRIPT
+chmod +x "${SCRIPT_DIR}/run.sh"
+ok "run.sh created — use ./run.sh --target <IP> from now on"
+echo ""
+
+# ===========================================================================
 # 4 — Tool availability check (non-fatal — warns only)
 # ===========================================================================
 info "Checking tool availability..."
@@ -229,11 +279,11 @@ ok "output/targets/ ready"
 echo ""
 
 # ===========================================================================
-# 6 — Quick smoke test (python import check)
+# 6 — Quick smoke test (python import check, using venv)
 # ===========================================================================
 info "Running Python import check..."
-if python3 -c "
-import sys, pathlib
+if "${VENV_PYTHON}" -c "
+import sys
 sys.path.insert(0, '${SCRIPT_DIR}')
 from core.session import Session, TargetInfo
 from core.engine import Engine
@@ -270,8 +320,12 @@ echo -e "  ${BOLD}  Installation complete!${NC}"
 echo -e "  ${BOLD}============================================================${NC}"
 echo ""
 echo -e "  Run the framework:"
+echo -e "  ${WHITE}./run.sh --target <IP>${NC}"
+echo -e "  ${WHITE}./run.sh --target <IP> --domain corp.local --lhost <LHOST>${NC}"
+echo -e "  ${WHITE}./run.sh --target <IP> --dry-run${NC}"
+echo -e "  ${WHITE}./run.sh --target <IP> --modules smb web${NC}"
+echo ""
+echo -e "  Or activate the venv manually:"
+echo -e "  ${WHITE}source .venv/bin/activate${NC}"
 echo -e "  ${WHITE}python3 main.py --target <IP>${NC}"
-echo -e "  ${WHITE}python3 main.py --target <IP> --domain corp.local${NC}"
-echo -e "  ${WHITE}python3 main.py --target <IP> --dry-run${NC}"
-echo -e "  ${WHITE}python3 main.py --target <IP> --modules smb web${NC}"
 echo ""
