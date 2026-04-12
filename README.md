@@ -1,6 +1,6 @@
 # ARGUS — OSCP Enumeration Framework
 
-```
+```text
  ██████╗ ██████╗  ██████╗ ██╗   ██╗███████╗
 ██╔══██╗██╔══██╗██╔════╝ ██║   ██║██╔════╝
 ███████║██████╔╝██║  ███╗██║   ██║███████╗
@@ -46,7 +46,7 @@ manual commands to run — nothing is executed automatically.
 ## OSCP+ Compliance
 
 | Requirement | ARGUS Behaviour |
-|-------------|-----------------|
+| ----------- | --------------- |
 | No automated exploitation | All attack chains are `[MANUAL]` hints only — the framework never executes exploits |
 | No prohibited tools | SQLMap, mass scanners, and automated brute-force are never invoked |
 | Metasploit not used | Zero Metasploit references in any wrapper or Python module |
@@ -65,7 +65,7 @@ Python **3.8 or newer** is required. 3.10+ is recommended.
 
 ### pip packages
 
-```
+```text
 rich>=13.0.0
 ```
 
@@ -120,16 +120,19 @@ because a secondary tool is missing.
 git clone https://github.com/acanoman/oscp-framework
 cd oscp-framework
 
-# 2. Run the installer (creates venv, installs deps, sets permissions)
+# 2. Run the installer
 sudo bash install.sh
 
-# 3. Activate the virtual environment
-source .venv/bin/activate
+# 3. Run
+./run.sh --target <IP>
 ```
 
-`install.sh` creates a Python virtual environment, installs pip packages, sets
-`+x` on all wrappers, and checks which optional tools are available. All checks
-are non-fatal — missing optional tools are reported as warnings.
+`install.sh` creates a `.venv/` Python virtual environment, installs pip
+packages into it, sets `+x` on all wrappers, and checks which optional tools
+are available. At the end it writes `run.sh` — a one-line launcher that calls
+`.venv/bin/python main.py` directly, so you never need to activate the venv
+manually. All tool checks are non-fatal — missing optional tools are reported
+as warnings, not errors.
 
 ---
 
@@ -236,7 +239,7 @@ ARGUS streams all tool output directly to the terminal with colour-coded prefixe
 After all modules complete, ARGUS prints a synthesized panel showing every
 manual step in priority order:
 
-```
+```text
 ══════════════════ 🎯  ATTACK PATH — RUN THESE MANUALLY ══════════════════
 
 ┌─ PRIORITIZED NEXT STEPS ────────────────────────────────────────────────┐
@@ -422,7 +425,7 @@ appear in three places:
 
 ### Example — Users found → spray pipeline
 
-```
+```text
 [MANUAL] Password policy check (before spraying): crackmapexec smb 10.10.10.5 --pass-pol
 [MANUAL] AS-REP Roasting (no pre-auth accounts): impacket-GetNPUsers CORP/ -dc-ip 10.10.10.5 -no-pass -usersfile users.txt ...
 [MANUAL] SMB spray: crackmapexec smb 10.10.10.5 -u users.txt -p /usr/share/wordlists/rockyou.txt --no-bruteforce
@@ -431,14 +434,14 @@ appear in three places:
 
 ### Example — LDAP description field password
 
-```
+```text
 [!] LDAP: 3 accounts have description fields — review for embedded passwords
 [CRITICAL] LDAP description field looks like a password: 'Welcome2023!'
 ```
 
 ### Example — Downloadable file found by web scanner
 
-```
+```text
 [+] Potential download/loot file at: http://10.10.10.5/files/backup
 [MANUAL] Download and inspect: wget 'http://10.10.10.5/files/backup' -O /tmp/backup &&
          file /tmp/backup && strings /tmp/backup | grep -iE 'pass|user|admin|secret|key|token' | head -20
