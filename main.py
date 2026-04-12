@@ -5,17 +5,11 @@ Usage: python main.py --target <IP> [options]
 """
 
 import argparse
-import queue
 import sys
+import time
 
-from rich.console import Console
-
+from core.display import banner, status_line, warn, error
 from core.engine import Engine
-
-# ARGUS-TUI integration — import the TUI class
-from ui import ArgusUI
-
-console = Console()
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,18 +114,9 @@ Examples:
 
 def main() -> None:
     args = parse_args()
+    banner()
 
-    # ARGUS-TUI integration — create the shared queue and start the TUI
-    # before the engine so the first log lines are captured from the start.
-    tui_queue: queue.Queue = queue.Queue()
-    tui = ArgusUI(
-        tui_queue=tui_queue,
-        target=args.target,
-        domain=args.domain,
-    )
-    tui.start()
-    # IMP-applied: TUI runs in a daemon thread; engine output is non-blocking.
-
+    start = time.time()
     engine = Engine(
         target=args.target,
         domain=args.domain,
@@ -141,24 +126,22 @@ def main() -> None:
         forced_modules=args.modules,
         lhost=args.lhost,
         resume=args.resume,
-        tui_queue=tui_queue,  # ARGUS-TUI integration
     )
 
     try:
         engine.run()
-        tui.signal_done()           # ARGUS-TUI integration — mark session complete
     except KeyboardInterrupt:
-        console.print("\n[bold yellow][!] Interrupted by user. Session state saved.[/bold yellow]")
+        warn("Interrupted by user. Session state saved.")
     except Exception as exc:
-        console.print(f"[bold red][✗] Fatal error:[/bold red] {exc}")
+        error(f"Fatal error: {exc}")
         if args.verbose:
-            tui.stop()
             raise
         sys.exit(1)
     finally:
-        # ARGUS-TUI integration — cleanly stop TUI and print summary
-        tui.stop()
-        tui.print_summary()
+        total = int(time.time() - start)
+        mins, secs = total // 60, total % 60
+        elapsed_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+        status_line(args.target, "session complete", elapsed_str)
 
 
 if __name__ == "__main__":

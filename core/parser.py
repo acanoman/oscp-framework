@@ -9,6 +9,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Tuple, TYPE_CHECKING
 
+from core.display import success
+
 if TYPE_CHECKING:
     from core.session import TargetInfo
 
@@ -95,6 +97,7 @@ class NmapParser:
         if 88 in info.open_ports and (info.open_ports & {389, 636, 3268, 3269}):
             if not info.is_domain_controller:
                 info.is_domain_controller = True
+                success("Domain Controller inferred: Kerberos (88) + LDAP/GC ports open")
                 self.log.info(
                     "Domain Controller inferred: Kerberos (88) + LDAP/GC ports open"
                 )
@@ -173,6 +176,7 @@ def _enrich_from_version_string(
         if re.search(r"active.directory|domain.controller", lower):
             if not info.is_domain_controller:
                 info.is_domain_controller = True
+                success(f"DC confirmed via LDAP banner on port {port}")
                 log.info("DC confirmed via LDAP banner on port %d", port)
 
     # SSH banner often contains kernel/OS info: "OpenSSH 7.9p1 Debian 4.19.0-13"

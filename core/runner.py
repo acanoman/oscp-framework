@@ -9,10 +9,12 @@ Ctrl+C, preventing orphaned background scan processes from consuming RAM.
 """
 
 import os
-import queue as _queue_mod
 import signal
 import subprocess
+from subprocess import PIPE, STDOUT
 from typing import Optional
+
+from core.display import info, success, warn, error
 
 
 def run_wrapper(
@@ -20,10 +22,10 @@ def run_wrapper(
     session,
     label: str = "",
     dry_run: bool = False,
-    tui_queue=None,   # ARGUS-TUI integration
 ) -> int:
     """
-    Execute *cmd* in its own process group, log it, and return the exit code.
+    Execute *cmd* in its own process group, stream output to the terminal,
+    and return the exit code.
 
     On KeyboardInterrupt the entire process group is terminated (SIGTERM,
     escalating to SIGKILL after 5 s) and the exception is re-raised so the
@@ -31,14 +33,10 @@ def run_wrapper(
     other modules let it propagate to the engine).
 
     Args:
-        cmd:       Command list passed to Popen (e.g. ["bash", "wrapper.sh", ...]).
-        session:   Active Session object — session.log is used for all output.
-        label:     Human-readable name for warning messages (defaults to cmd[0]).
-        dry_run:   If True, log the command but do not execute it.
-        tui_queue: Optional queue.Queue for streaming stdout lines to the TUI.
-                   When provided, stdout/stderr are captured and each decoded
-                   line is put() into the queue as a raw string.
-                   # ARGUS-TUI integration
+        cmd:     Command list passed to Popen (e.g. ["bash", "wrapper.sh", ...]).
+        session: Active Session object — session.log is used for all output.
+        label:   Human-readable name for warning messages (defaults to cmd[0]).
+        dry_run: If True, log the command but do not execute it.
 
     Returns:
         Exit code of the subprocess, or -1 if the binary was not found.
@@ -48,51 +46,43 @@ def run_wrapper(
     display = " ".join(str(c) for c in cmd)
     prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
     log.info("%s %s", prefix, display)
-
-    # ARGUS-TUI integration — forward the command itself to live output
-    if tui_queue is not None:
-        tui_queue.put(f"[>] {display}")
+    info(f"> {display}")
 
     if dry_run:
         return 0
 
     proc: Optional[subprocess.Popen] = None
     try:
-        # ARGUS-TUI integration — capture stdout when TUI is active so we can
-        # stream each line into the queue.  Without TUI, keep existing behaviour
-        # (no pipe, no buffering risk).
-        if tui_queue is not None:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-            )
-            # Stream stdout line-by-line into the TUI queue
-            for raw_line in proc.stdout:  # type: ignore[union-attr]
-                line = raw_line.rstrip("\n")
-                if line:
-                    tui_queue.put(line)      # ARGUS-TUI integration
-                    log.debug("wrapper: %s", line)
-            proc.wait()
-        else:
-            proc = subprocess.Popen(cmd, text=True, start_new_session=True)
-            proc.wait()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=PIPE,
+            stderr=STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        for raw_line in proc.stdout:  # type: ignore[union-attr]
+            line = raw_line.strip()
+            if line:
+                if line.startswith("[+]"):
+                    success(line[3:].strip())
+                elif line.startswith("[!]"):
+                    warn(line[3:].strip())
+                else:
+                    info(line)
+                log.debug("wrapper: %s", line)
+        proc.wait()
 
         rc = proc.returncode if proc.returncode is not None else 0
         if rc != 0:
+            warn(f"{label or cmd[0]} exited with code {rc}")
             log.warning("%s exited with code %d", label or cmd[0], rc)
-            if tui_queue is not None:
-                tui_queue.put(f"[!] {label or cmd[0]} exited with code {rc}")
         return rc
     except KeyboardInterrupt:
         _kill_proc_group(proc, log)
         raise
     except FileNotFoundError:
+        error(f"Command not found: {cmd[0]}")
         log.error("Command not found: %s", cmd[0])
-        if tui_queue is not None:                          # ARGUS-TUI integration
-            tui_queue.put(f"[!] Command not found: {cmd[0]}")
         return -1
 
 

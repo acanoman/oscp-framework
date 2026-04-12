@@ -31,6 +31,7 @@ from rich.panel import Panel
 from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
+from core.display import module_start, module_done, info, success, warn, error
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +304,6 @@ class Engine:
         forced_modules: Optional[List[str]] = None,
         lhost:          str         = "",
         resume:         bool        = False,
-        tui_queue=None,             # ARGUS-TUI integration
     ) -> None:
         self.target         = target
         self.domain         = domain
@@ -312,7 +312,6 @@ class Engine:
         self.forced_modules = forced_modules or []
         self.lhost          = lhost
         self.resume         = resume
-        self._tui_queue     = tui_queue  # ARGUS-TUI integration
 
         # Timing — set at the start of _run_inner()
         self._run_start: float = 0.0
@@ -327,26 +326,6 @@ class Engine:
         self.info: TargetInfo = self.session.info
         self.log        = self.session.log
         self.recommender = Recommender(self.info, self.log, self.console)
-
-    # ------------------------------------------------------------------
-    # ARGUS-TUI integration — helpers to push messages into the TUI queue
-    # ------------------------------------------------------------------
-
-    def _tui_put(self, msg) -> None:
-        """Non-blocking push to the TUI queue; no-op if TUI is not active."""
-        # ARGUS-TUI integration
-        if self._tui_queue is not None:
-            self._tui_queue.put(msg)
-
-    def _tui_module_status(self, module: str, state: str) -> None:
-        """Notify the TUI of a module state transition."""
-        # ARGUS-TUI integration
-        self._tui_put({"type": "module_status", "module": module, "state": state})
-
-    def _tui_log(self, line: str) -> None:
-        """Send a plain log line to the TUI live output panel."""
-        # ARGUS-TUI integration
-        self._tui_put(line)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -444,7 +423,7 @@ class Engine:
                 self.console.print()
                 self.log.info("--- Tier %d modules starting ---", tier)
 
-            module_start = time.time()
+            mod_start_time = time.time()
             try:
                 self._run_module(module_name)
             except KeyboardInterrupt:
@@ -461,10 +440,9 @@ class Engine:
                 self.session.save_state()
                 continue
 
-            module_elapsed = time.time() - module_start
+            module_elapsed = time.time() - mod_start_time
             self.console.print(
-                f"  [bold green][✓][/bold green] [bold]{module_name.upper()}[/bold] "
-                f"completed in [cyan]{_format_elapsed(module_elapsed)}[/cyan]"
+                f"  completed in [cyan]{_format_elapsed(module_elapsed)}[/cyan]"
             )
             self.log.info(
                 "Module '%s' completed in %.1fs", module_name, module_elapsed
@@ -570,10 +548,6 @@ class Engine:
         self.log.info("PHASE 1 — Initial Nmap Recon")
         self.log.info("=" * 60)
 
-        # ARGUS-TUI integration — mark RECON as running in sidebar
-        self._tui_module_status("recon", "running")
-        self._tui_log("[-] Starting initial Nmap recon scan...")
-
         script = WRAPPERS_DIR / "recon.sh"
 
         cmd = [
@@ -601,12 +575,6 @@ class Engine:
             self.session.add_note(
                 f"Nmap found ports: {sorted(self.info.open_ports)}"
             )
-            # ARGUS-TUI integration — report discovered ports to live output
-            self._tui_log(
-                f"[+] RECON complete — {len(self.info.open_ports)} port(s) open: "
-                f"{sorted(self.info.open_ports)}"
-            )
-            self._tui_module_status("recon", "done")
 
             # Auto-detect Domain Controller from port fingerprint:
             # Kerberos (88) + any LDAP variant is a near-certain DC indicator.
@@ -791,19 +759,14 @@ class Engine:
 
     def _run_module(self, module_name: str) -> None:
         """Dynamically import and run a module by name."""
-        self.console.rule(f"[bold blue] MODULE — {module_name.upper()} [/bold blue]")
+        module_start(module_name.upper())
         self.log.info("MODULE — %s", module_name.upper())
-
-        # ARGUS-TUI integration — mark module as running in the sidebar
-        self._tui_module_status(module_name, "running")
 
         if module_name not in MODULE_REGISTRY:
             self.console.print(
                 f"  [bold red][✗][/bold red] Unknown module: [yellow]{module_name}[/yellow]"
             )
             self.log.error("Unknown module '%s' — skipping.", module_name)
-            # ARGUS-TUI integration — unknown module stays pending; log the skip
-            self._tui_log(f"[!] Unknown module '{module_name}' — skipped")
             return
 
         try:
@@ -821,27 +784,16 @@ class Engine:
                 target=self.target,
                 session=self.session,
                 dry_run=self.dry_run,
-                tui_queue=self._tui_queue,   # ARGUS-TUI integration
-            )
-        except TypeError:
-            # Older module signatures don't accept tui_queue — call without it
-            mod.run(
-                target=self.target,
-                session=self.session,
-                dry_run=self.dry_run,
             )
         except Exception as exc:
             self.console.print(
                 f"  [bold red][✗][/bold red] Module [yellow]{module_name}[/yellow] failed: {exc}"
             )
             self.log.error("Module '%s' failed: %s", module_name, exc)
-            # ARGUS-TUI integration — log failure to live output
-            self._tui_log(f"[!] Module {module_name.upper()} failed: {exc}")
             if self.verbose:
                 raise
 
-        # ARGUS-TUI integration — mark module done after run() returns
-        self._tui_module_status(module_name, "done")
+        module_done(module_name.upper())
 
     # ------------------------------------------------------------------
     # Command execution
@@ -867,10 +819,10 @@ class Engine:
         up to the per-module handler in _run_inner() so the user stays in full
         control of when to skip a running tool.
         """
-        display = " ".join(str(c) for c in cmd)
+        display_cmd = " ".join(str(c) for c in cmd)
         tag = "DRY-RUN" if self.dry_run else "CMD"
-        self.log.info("[%s] %s", tag, display)
-        self.console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
+        self.log.info("[%s] %s", tag, display_cmd)
+        info(f"> {display_cmd}")
 
         if self.dry_run:
             return None
@@ -880,22 +832,35 @@ class Engine:
         last_rc: int = -1
 
         for attempt in range(1, attempts + 1):
+            proc = None
             try:
-                result  = subprocess.run(cmd, text=True, check=False)
-                last_rc = result.returncode
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+                for raw_line in proc.stdout:  # type: ignore[union-attr]
+                    line = raw_line.strip()
+                    if line:
+                        if line.startswith("[+]"):
+                            success(line[3:].strip())
+                        elif line.startswith("[!]"):
+                            warn(line[3:].strip())
+                        else:
+                            info(line)
+                        self.log.debug("exec: %s", line)
+                proc.wait()
+                last_rc = proc.returncode if proc.returncode is not None else 0
 
                 if last_rc == 0:
-                    self.console.print(
-                        f"  [bold green][✓][/bold green] {name} complete"
-                    )
                     return last_rc
 
                 if last_rc in self._RETRYABLE_CODES and attempt < attempts:
-                    self.console.print(
-                        f"  [bold yellow][!][/bold yellow] {name} exited with code "
-                        f"[yellow]{last_rc}[/yellow] — "
-                        f"⚠️  Network/Execution error detected. "
-                        f"Retrying in {self._RETRY_DELAY} seconds... "
+                    warn(
+                        f"{name} exited with code {last_rc} — "
+                        f"retrying in {self._RETRY_DELAY}s "
                         f"(attempt {attempt}/{attempts - 1})"
                     )
                     self.log.warning(
@@ -906,18 +871,25 @@ class Engine:
                     continue
 
                 # Non-retryable failure or final attempt
-                self.console.print(
-                    f"  [bold yellow][!][/bold yellow] {name} exited with code "
-                    f"[yellow]{last_rc}[/yellow]"
-                )
+                warn(f"{name} exited with code {last_rc}")
                 self.log.warning("%s exited with code %d", name, last_rc)
                 return last_rc
 
+            except KeyboardInterrupt:
+                # Kill the child (start_new_session means Ctrl-C doesn't reach it)
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                raise
+
             except FileNotFoundError:
-                self.console.print(
-                    f"  [bold red][✗][/bold red] Command not found: "
-                    f"[yellow]{cmd[0]}[/yellow] — is the wrapper executable?"
-                )
+                error(f"Command not found: {cmd[0]} — is the wrapper executable?")
                 self.log.error("Command not found: %s", cmd[0])
                 return -1
 
