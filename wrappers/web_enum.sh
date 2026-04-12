@@ -131,6 +131,57 @@ echo -e "  ${BOLD}============================================================${
 echo ""
 
 # ===========================================================================
+# 0 — Instant fingerprint (3s timeout — always runs before Ctrl+C is possible)
+#     Identifies the application BEFORE feroxbuster so early aborts still have
+#     useful data.  Written to quick_fingerprint<SUFFIX>.txt immediately.
+# ===========================================================================
+QUICK_OUT="${WEB_DIR}/quick_fingerprint${SUFFIX}.txt"
+info "[0/10] Quick port fingerprint (3s)"
+# Single HEAD + body grab with aggressive timeout — just enough to see the banner
+RAW_HEADERS=$(curl -ksILm 3 --max-redirs 2 "$BASE_URL" 2>/dev/null || true)
+echo "$RAW_HEADERS" > "$QUICK_OUT"
+
+QF_SERVER=$(echo "$RAW_HEADERS"  | grep -i '^Server:'       | tail -1 | sed 's/^[Ss]erver:[[:space:]]*//' | tr -d '\r')
+QF_POWERED=$(echo "$RAW_HEADERS" | grep -i '^X-Powered-By:' | tail -1 | sed 's/^[Xx]-[Pp]owered-[Bb]y:[[:space:]]*//' | tr -d '\r')
+QF_CTYPE=$(echo "$RAW_HEADERS"   | grep -i '^Content-Type:' | tail -1 | sed 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//' | tr -d '\r')
+QF_CODE=$(echo "$RAW_HEADERS"    | grep -oP 'HTTP/[\d.]+ \K\d{3}' | tail -1 || true)
+
+[[ -n "$QF_CODE"   ]] && ok   "HTTP Status   : ${WHITE}${QF_CODE}${NC}"
+[[ -n "$QF_SERVER" ]] && ok   "Server        : ${WHITE}${QF_SERVER}${NC}"
+[[ -n "$QF_POWERED"]] && ok   "X-Powered-By  : ${WHITE}${QF_POWERED}${NC}"
+[[ -n "$QF_CTYPE"  ]] && info "Content-Type  : ${QF_CTYPE}"
+
+# Detect common applications from headers alone (runs in < 1s)
+if echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'tomcat|catalina|coyote'; then
+    warn "Apache Tomcat detected on port ${PORT} — check /manager/html"
+    echo "APP_HINT=tomcat" >> "$QUICK_OUT"
+elif echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'jenkins'; then
+    warn "Jenkins detected on port ${PORT} — check /login (default: admin:admin)"
+    echo "APP_HINT=jenkins" >> "$QUICK_OUT"
+elif echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'jboss|wildfly'; then
+    warn "JBoss/WildFly detected on port ${PORT} — check /jmx-console"
+    echo "APP_HINT=jboss" >> "$QUICK_OUT"
+elif echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'weblogic'; then
+    warn "WebLogic detected on port ${PORT} — check /console"
+    echo "APP_HINT=weblogic" >> "$QUICK_OUT"
+elif echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'glassfish'; then
+    warn "GlassFish detected on port ${PORT} — check /common/logon/logon.jsf"
+    echo "APP_HINT=glassfish" >> "$QUICK_OUT"
+elif echo "$QF_SERVER $QF_POWERED" | grep -qiE 'php'; then
+    info "PHP detected — will prioritise .php extensions in directory scan"
+    echo "APP_HINT=php" >> "$QUICK_OUT"
+fi
+
+# Detect authentication requirement
+if echo "$RAW_HEADERS" | grep -qiE 'WWW-Authenticate:|401 Unauthorized'; then
+    warn "HTTP Basic Auth required on port ${PORT}"
+    hint "HTTP Basic Auth — brute force (with known users):
+  hydra -L ${OUTPUT_DIR}/users.txt -P /usr/share/wordlists/rockyou.txt ${TARGET} http-get / -s ${PORT}"
+fi
+
+echo ""
+
+# ===========================================================================
 # 1 — HTTP Headers + Quick reconnaissance (curl)
 # ===========================================================================
 info "[1/10] HTTP headers and initial page info (curl)"

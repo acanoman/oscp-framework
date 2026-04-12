@@ -193,6 +193,7 @@ def _parse_web_output(port: int, session, log) -> Optional[str]:
     suffix = "" if port in {80, 443} else f"_port{port}"
     web_dir = session.target_dir / "web"
 
+    _parse_quick_fingerprint(web_dir, suffix, port, session, log)
     _parse_directory_scan(web_dir, suffix, session, log)
     cms = _parse_whatweb(web_dir, suffix, session, log)
     _parse_hostnames(web_dir, session, log)
@@ -201,6 +202,70 @@ def _parse_web_output(port: int, session, log) -> Optional[str]:
     _parse_cgi_sniper(web_dir, suffix, session, log)
     _parse_download_files(web_dir, suffix, session, log)
     return cms
+
+
+def _parse_quick_fingerprint(web_dir: Path, suffix: str, port: int, session, log) -> None:
+    """
+    Parse quick_fingerprint<suffix>.txt written by web_enum.sh step 0.
+
+    This file is written in the first ~3 seconds of the wrapper (before any
+    long-running tool), so it contains server identification even when the
+    user Ctrl+C's the full scan early.
+
+    Extracts Server, X-Powered-By headers and any APP_HINT lines written
+    by the bash fingerprint block and records them as notes.
+    """
+    fp_file = web_dir / f"quick_fingerprint{suffix}.txt"
+    if not fp_file.exists() or fp_file.stat().st_size == 0:
+        return
+
+    content = fp_file.read_text(errors="ignore")
+    port_label = str(port)
+
+    # Server header
+    m_srv = re.search(r'^Server:\s*(.+)$', content, re.IGNORECASE | re.MULTILINE)
+    if m_srv:
+        server = m_srv.group(1).strip()
+        note = f"Web server on port {port_label}: {server}"
+        if note not in session.info.notes:
+            session.add_note(note)
+            log.info("Quick fingerprint port %s: Server=%s", port_label, server)
+
+    # X-Powered-By header
+    m_xpb = re.search(r'^X-Powered-By:\s*(.+)$', content, re.IGNORECASE | re.MULTILINE)
+    if m_xpb:
+        powered = m_xpb.group(1).strip()
+        note = f"Web powered-by on port {port_label}: {powered}"
+        if note not in session.info.notes:
+            session.add_note(note)
+            log.info("Quick fingerprint port %s: X-Powered-By=%s", port_label, powered)
+
+    # App hint written by bash (e.g. "APP_HINT=tomcat")
+    _APP_HINTS = {
+        "tomcat":   ("HIGH", "Apache Tomcat on port {p} — check /manager/html for default creds",
+                     "curl -sv http://{ip}:{p}/manager/html  # try tomcat:tomcat, admin:s3cret"),
+        "jenkins":  ("HIGH", "Jenkins on port {p} — check /login for default creds",
+                     "curl -sv http://{ip}:{p}/login  # default: admin:admin"),
+        "jboss":    ("HIGH", "JBoss/WildFly on port {p} — check /jmx-console",
+                     "curl -sv http://{ip}:{p}/jmx-console"),
+        "weblogic": ("HIGH", "WebLogic on port {p} — check /console for default creds",
+                     "curl -sv http://{ip}:{p}/console"),
+        "glassfish":("HIGH", "GlassFish on port {p} — check admin console",
+                     "curl -sv http://{ip}:{p}/common/logon/logon.jsf"),
+    }
+    m_hint = re.search(r'^APP_HINT=(\w+)$', content, re.MULTILINE)
+    if m_hint:
+        app_key = m_hint.group(1).lower()
+        if app_key in _APP_HINTS:
+            sev, desc_tmpl, cmd_tmpl = _APP_HINTS[app_key]
+            ip = session.info.ip
+            desc = desc_tmpl.format(p=port_label)
+            cmd  = cmd_tmpl.format(ip=ip, p=port_label)
+            note = f"{sev}: {desc}"
+            if note not in session.info.notes:
+                session.add_note(note)
+                session.add_note(f"[MANUAL] {desc}: {cmd}")
+                log.warning("Quick fingerprint detected %s on port %s", app_key, port_label)
 
 
 def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
