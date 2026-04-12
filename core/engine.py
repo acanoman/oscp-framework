@@ -981,8 +981,6 @@ class Engine:
                         self.console.print(
                             f"  [red][-][/red] [dim]{_esc(stripped[3:].strip())}[/dim]"
                         )
-                    elif stripped.startswith("[*]"):
-                        info(stripped[3:].strip())
                     elif stripped.startswith("[CMD]"):
                         from rich.markup import escape as _esc
                         self.console.print(
@@ -995,6 +993,8 @@ class Engine:
                             f"  [magenta][MANUAL][/magenta] "
                             f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
                         )
+                    elif stripped.startswith("[*]"):
+                        info(stripped[3:].strip())
                     elif stripped.startswith("[SKIP]"):
                         from rich.markup import escape as _esc
                         self.console.print(

@@ -260,74 +260,32 @@ if [[ -n "$NXC" ]]; then
     fi
     echo ""
 else
-    info "[6b/7] nxc/netexec not found — attempting impacket-lookupsid instead."
-    LSID_OUT="${SMB_DIR}/lookupsid_null.txt"
-
-    if command -v impacket-lookupsid &>/dev/null; then
-        # Try null session first
-        cmd "impacket-lookupsid ''@$TARGET 10000"
-        impacket-lookupsid "''@${TARGET}" 10000 \
-            2>&1 | tee "$LSID_OUT" || true
-
-        LSID_USERS=$(grep -oP 'SidTypeUser\)\s+\K\S+' "$LSID_OUT" 2>/dev/null \
-            | grep -v '\\' | sort -u || true)
-        if [[ -n "$LSID_USERS" ]]; then
-            echo "$LSID_USERS" >> "${SMB_DIR}/users_rpc.txt"
-            sort -u "${SMB_DIR}/users_rpc.txt" -o "${SMB_DIR}/users_rpc.txt" 2>/dev/null || true
-            ok "lookupsid (null) found: ${WHITE}$(echo "$LSID_USERS" | tr '\n' ' ')${NC}"
-        else
-            info "lookupsid null session failed — trying guest session"
-            cmd "impacket-lookupsid guest@$TARGET 10000"
-            impacket-lookupsid "guest@${TARGET}" 10000 \
-                2>&1 | tee "${SMB_DIR}/lookupsid_guest.txt" || true
-
-            LSID_GUEST=$(grep -oP 'SidTypeUser\)\s+\K\S+' \
-                "${SMB_DIR}/lookupsid_guest.txt" 2>/dev/null \
-                | grep -v '\\' | sort -u || true)
-            if [[ -n "$LSID_GUEST" ]]; then
-                echo "$LSID_GUEST" >> "${SMB_DIR}/users_rpc.txt"
-                sort -u "${SMB_DIR}/users_rpc.txt" -o "${SMB_DIR}/users_rpc.txt" 2>/dev/null || true
-                ok "lookupsid (guest) found: ${WHITE}$(echo "$LSID_GUEST" | tr '\n' ' ')${NC}"
-            fi
-        fi
-    else
-        hint "Manual RID cycling (install impacket for automatic fallback):
-    impacket-lookupsid ''@${TARGET} 10000
-    impacket-lookupsid guest@${TARGET} 10000"
-    fi
+    info "[6b/7] nxc/netexec not found — run impacket-lookupsid manually for RID cycling"
+    hint "RID cycling (nxc not available — run manually):
+  impacket-lookupsid ''@${TARGET} 10000 | tee ${SMB_DIR}/lookupsid_null.txt
+  impacket-lookupsid guest@${TARGET} 10000 | tee ${SMB_DIR}/lookupsid_guest.txt
+  grep 'SidTypeUser' ${SMB_DIR}/lookupsid_null.txt | awk '{print \$NF}' | cut -d'\\' -f2 | sort -u > ${SMB_DIR}/users_rpc.txt"
     echo ""
 fi
 
 # ===========================================================================
-# 6d — impacket-lookupsid as secondary check after nxc RID cycling
-#      Runs when nxc found nothing (null + guest both empty), ensuring
-#      a second tool gets a chance before giving up on SID enumeration.
+# 6d — impacket-lookupsid hint when nxc RID cycling returns nothing
+#      Shown only when nxc found zero users — gives the operator the exact
+#      commands to run manually without executing anything automatically.
 # ===========================================================================
-if [[ -n "$NXC" ]] && command -v impacket-lookupsid &>/dev/null; then
+if [[ -n "$NXC" ]]; then
     USERS_RPC="${SMB_DIR}/users_rpc.txt"
-    EXISTING_COUNT=$(wc -l < "$USERS_RPC" 2>/dev/null || echo 0)
+    if [ -f "$USERS_RPC" ]; then
+        EXISTING_COUNT=$(wc -l < "$USERS_RPC")
+    else
+        EXISTING_COUNT=0
+    fi
     if [[ "$EXISTING_COUNT" -eq 0 ]]; then
-        info "[6d/7] nxc RID cycling found nothing — trying impacket-lookupsid as fallback"
-        LSID_OUT="${SMB_DIR}/lookupsid_fallback.txt"
-
-        cmd "impacket-lookupsid ''@$TARGET 10000"
-        impacket-lookupsid "''@${TARGET}" 10000 \
-            2>&1 | tee "$LSID_OUT" || true
-
-        LSID_USERS=$(grep -oP 'SidTypeUser\)\s+\K\S+' "$LSID_OUT" 2>/dev/null \
-            | grep -v '\\' | sort -u || true)
-        if [[ -n "$LSID_USERS" ]]; then
-            echo "$LSID_USERS" > "$USERS_RPC"
-            ok "lookupsid fallback found: ${WHITE}$(echo "$LSID_USERS" | tr '\n' ' ')${NC}"
-        else
-            cmd "impacket-lookupsid guest@$TARGET 10000"
-            impacket-lookupsid "guest@${TARGET}" 10000 \
-                2>&1 | tee -a "$LSID_OUT" || true
-            LSID_USERS=$(grep -oP 'SidTypeUser\)\s+\K\S+' "$LSID_OUT" 2>/dev/null \
-                | grep -v '\\' | sort -u || true)
-            [[ -n "$LSID_USERS" ]] && echo "$LSID_USERS" > "$USERS_RPC" && \
-                ok "lookupsid (guest fallback) found: ${WHITE}$(echo "$LSID_USERS" | tr '\n' ' ')${NC}"
-        fi
+        info "[6d/7] nxc RID cycling found no users — try impacket-lookupsid manually"
+        hint "RID cycling fallback (nxc returned nothing):
+  impacket-lookupsid ''@${TARGET} 10000 | tee ${SMB_DIR}/lookupsid_fallback.txt
+  impacket-lookupsid guest@${TARGET} 10000 | tee -a ${SMB_DIR}/lookupsid_fallback.txt
+  grep 'SidTypeUser' ${SMB_DIR}/lookupsid_fallback.txt | awk '{print \$NF}' | cut -d'\\' -f2 | sort -u > ${SMB_DIR}/users_rpc.txt"
         echo ""
     fi
 fi
