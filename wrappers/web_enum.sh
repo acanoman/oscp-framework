@@ -324,7 +324,8 @@ if command -v feroxbuster &>/dev/null; then
             -x "$ENUM_EXTS" \
             -t 50 -k -q -d 2 \
             --filter-status 403 \
-            -o "$FEROX_OUT" 2>&1 | tee "${FEROX_OUT}.log" || true
+            --no-state \
+            -o "$FEROX_OUT" < /dev/null 2>&1 | tee "${FEROX_OUT}.log" || true
         ok "Feroxbuster done → ${WHITE}${FEROX_OUT}${NC}"
     else
         warn "No medium wordlist found. Install dirbuster wordlists or seclists."

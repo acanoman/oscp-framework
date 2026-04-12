@@ -155,20 +155,43 @@ def _parse_ssh(session, log) -> None:
         if cves:
             unique_cves = sorted(set(cves))
             log.warning("SSH CVEs found: %s", unique_cves)
-            session.add_note(f"SSH CVEs: {unique_cves}")
+            session.add_note(f"HIGH: SSH CVEs detected: {unique_cves}")
 
+    # Check which users have password auth enabled (nmap ssh-auth-methods)
+    # Output format:
+    #   22/tcp open ssh
+    #   | ssh-auth-methods:
+    #   |   Supported authentication methods:
+    #   |     publickey
+    #   |     password
     auth_file = ssh_dir / "ssh_auth_methods.txt"
     if auth_file.exists():
         content = auth_file.read_text(errors="ignore")
-        for user in ("root", "admin", "user", "www-data"):
-            pattern = rf'ssh-auth-methods.*{user}.*\n.*password'
-            block = re.search(
-                r'Supported authentication methods.*?(?=\n\n|\Z)',
-                content, re.DOTALL,
+
+        # Detect password auth globally (single-block output)
+        if re.search(r'\bpassword\b', content, re.IGNORECASE):
+            log.warning("SSH password authentication enabled on %s", session.info.ip)
+            session.add_note(
+                f"HIGH: SSH password auth enabled — brute-force is possible: "
+                f"hydra -l <user> -P /usr/share/wordlists/rockyou.txt "
+                f"ssh://{session.info.ip}"
             )
-            if block and "password" in block.group().lower():
-                log.info("SSH password auth available (check individual user files)")
-                break
+
+        # Also parse per-user blocks if the script was run for specific users
+        # Format: "22/tcp ... | ssh-auth-methods: (username: root) ... password"
+        for m in re.finditer(
+            r'ssh-auth-methods[^|]*\(username[:\s]+([^\)]+)\)(.*?)(?=ssh-auth-methods|\Z)',
+            content, re.DOTALL | re.IGNORECASE,
+        ):
+            user = m.group(1).strip()
+            methods_block = m.group(2)
+            if re.search(r'\bpassword\b', methods_block, re.IGNORECASE):
+                log.warning("SSH password auth available for user: %s", user)
+                session.add_note(
+                    f"HIGH: SSH password auth available for '{user}' — "
+                    f"hydra -l {user} -P /usr/share/wordlists/rockyou.txt "
+                    f"ssh://{session.info.ip}"
+                )
 
 
 def _parse_snmp(session, log) -> None:

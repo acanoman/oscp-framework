@@ -240,6 +240,21 @@ def _parse_directory_scan(web_dir: Path, suffix: str, session, log) -> None:
             for s in sensitive:
                 session.add_note(f"SENSITIVE FILE: {s}")
 
+        # Flag high-value paths that often contain credentials or admin interfaces
+        _HIGH_VALUE = re.compile(
+            r'/(backup[s_-]|\.git|\.svn|phpinfo|config|setup|install|admin'
+            r'|phpmyadmin|manager|console|dashboard|wp-admin|xmlrpc'
+            r'|\.env|\.htpasswd|web\.config|passwd|shadow'
+            r'|backup_migrate|cron\.php|update\.php)',
+            re.IGNORECASE,
+        )
+        for p in paths:
+            if _HIGH_VALUE.search(p):
+                note = f"HIGH-VALUE PATH: {p}"
+                if note not in session.info.notes:
+                    session.add_note(note)
+                    log.warning("High-value web path found: %s", p)
+
     if paths:
         new_paths = [p for p in sorted(paths) if p not in session.info.web_paths]
         session.info.web_paths.extend(new_paths)
@@ -279,6 +294,40 @@ def _parse_whatweb(web_dir: Path, suffix: str, session, log) -> Optional[str]:
     first_line = content.splitlines()[0] if content.strip() else ""
     if first_line:
         session.add_note(f"WhatWeb{suffix}: {first_line[:120]}")
+
+    # Apache version detection — extract and flag potentially old versions
+    apache_m = re.search(r'Apache[/\[\s]+([\d]+\.[\d]+\.?[\d]*)', content, re.IGNORECASE)
+    if apache_m:
+        version_str = apache_m.group(1)
+        try:
+            parts = [int(x) for x in version_str.split(".")]
+            major, minor = parts[0], parts[1] if len(parts) > 1 else 0
+            patch = parts[2] if len(parts) > 2 else 0
+            port_label = "443" if suffix == "" else suffix.lstrip("_port")
+            if major < 2 or (major == 2 and minor < 4):
+                log.warning("Old Apache version detected: %s (port %s)", version_str, port_label)
+                session.add_note(
+                    f"HIGH: Apache {version_str} on port {port_label} — "
+                    f"EOL/old version, check searchsploit apache {version_str}"
+                )
+            elif major == 2 and minor == 4 and patch < 50:
+                log.info("Potentially outdated Apache 2.4.x: %s (port %s)", version_str, port_label)
+                session.add_note(
+                    f"INFO: Apache {version_str} on port {port_label} — "
+                    f"verify if patched: searchsploit apache {version_str}"
+                )
+            else:
+                log.info("Apache %s detected on port %s", version_str, port_label)
+        except (ValueError, IndexError):
+            pass
+
+    # nginx version detection
+    nginx_m = re.search(r'nginx[/\[\s]+([\d]+\.[\d]+\.?[\d]*)', content, re.IGNORECASE)
+    if nginx_m:
+        version_str = nginx_m.group(1)
+        port_label = "443" if suffix == "" else suffix.lstrip("_port")
+        log.info("nginx %s detected on port %s", version_str, port_label)
+        session.add_note(f"INFO: nginx {version_str} on port {port_label}")
 
     return detected
 
