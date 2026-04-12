@@ -1001,70 +1001,39 @@ class Engine:
     # ------------------------------------------------------------------
 
     def _banner(self) -> None:
-        # ── ASCII art logo (OSCP block letters) ─────────────────────────────
-        _ART = [
-            "  ██████╗ ███████╗ ██████╗██████╗ ",
-            " ██╔═══██╗██╔════╝██╔════╝██╔══██╗",
-            " ██║   ██║███████╗██║     ██████╔╝ ",
-            " ██║   ██║╚════██║██║     ██╔═══╝  ",
-            " ╚██████╔╝███████║╚██████╗██║      ",
-            "  ╚═════╝ ╚══════╝ ╚═════╝╚═╝     ",
-        ]
-        # Side-column text aligned to the right of rows 1-5
-        _SIDE = [
-            "",
-            "    [bold cyan]E N U M E R A T I O N   F R A M E W O R K[/bold cyan]",
-            "    [dim]Assisted recon.  Never autopwn.[/dim]",
-            "    [dim]Recon  →  Enumerate  →  Report[/dim]",
-            "",
-            "    [bold bright_red]☠   by acanoman   ☠[/bold bright_red]",
-        ]
-
-        self.console.print()
-        for art_line, side_line in zip(_ART, _SIDE):
-            self.console.print(
-                f"[bold bright_green]{art_line}[/bold bright_green]{side_line}"
-            )
-
-        # Divider
-        self.console.print()
-        self.console.print(
-            "  [bold red]" + "━" * 62 + "[/bold red]"
-        )
-
         # ── Target info panel ────────────────────────────────────────────────
         info_lines = [
-            f"[bold white]Target :[/bold white] [bold cyan]{self.target}[/bold cyan]"
+            f"  [bold white]Target :[/bold white] [bold cyan]{self.target}[/bold cyan]"
         ]
         if self.domain:
             info_lines.append(
-                f"[bold white]Domain :[/bold white] [bold cyan]{self.domain}[/bold cyan]"
+                f"  [bold white]Domain :[/bold white] [bold cyan]{self.domain}[/bold cyan]"
             )
         info_lines.append(
-            f"[bold white]Output :[/bold white] [dim]{self.session.target_dir}[/dim]"
+            f"  [bold white]Output :[/bold white] [dim]{self.session.target_dir}[/dim]"
         )
         if self.lhost:
             info_lines.append(
-                f"[bold white]LHOST  :[/bold white] [bold green]{self.lhost}[/bold green]"
+                f"  [bold white]LHOST  :[/bold white] [bold green]{self.lhost}[/bold green]"
                 "  [dim](Arsenal Recommender)[/dim]"
             )
         if self.dry_run:
             info_lines.append(
-                "[bold yellow]Mode   :[/bold yellow] "
+                "  [bold yellow]Mode   :[/bold yellow] "
                 "[bold yellow]DRY-RUN — commands printed but NOT executed[/bold yellow]"
             )
         if self.resume:
             info_lines.append(
-                "[bold green]Mode   :[/bold green] "
+                "  [bold green]Mode   :[/bold green] "
                 "[bold green]RESUME — continuing previous session[/bold green]"
             )
 
         self.console.print(
             Panel(
                 "\n".join(info_lines),
-                title="[bold red] ☠  TARGET  ☠ [/bold red]",
-                border_style="red",
-                padding=(1, 4),
+                title="[bold cyan] TARGET [/bold cyan]",
+                border_style="cyan",
+                padding=(0, 2),
             )
         )
         self.console.print()

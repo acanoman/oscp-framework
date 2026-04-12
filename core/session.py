@@ -772,22 +772,26 @@ class Session:
         if log.handlers:
             return log
 
-        # ── Console handler — human-readable, INFO and above ────────────
-        console_fmt = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S",
-        )
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(logging.DEBUG if self.verbose else logging.INFO)
-        ch.setFormatter(console_fmt)
-        log.addHandler(ch)
-
-        # ── File handler — structured JSON Lines (one JSON object / line) ─
+        # ── File handler only — structured JSON Lines (one JSON object / line)
+        # Console output is handled exclusively by Rich in engine.py so there
+        # are no interleaved plain-text log lines polluting the terminal UI.
+        # Verbose mode (--verbose) additionally attaches a console handler so
+        # DEBUG messages are visible when explicitly requested.
         log_file = self.target_dir / "session.jsonl"
         fh = logging.FileHandler(log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(_JsonFormatter())
         log.addHandler(fh)
+
+        if self.verbose:
+            console_fmt = logging.Formatter(
+                fmt="%(asctime)s [%(levelname)s] %(message)s",
+                datefmt="%H:%M:%S",
+            )
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setLevel(logging.DEBUG)
+            ch.setFormatter(console_fmt)
+            log.addHandler(ch)
 
         return log
 
