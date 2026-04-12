@@ -587,6 +587,33 @@ class Session:
                 lines.append(f"- {note}")
             lines.append("")
 
+        # ── Detected Versions + Searchsploit ─────────────────────────
+        version_notes = [
+            n for n in self.info.notes
+            if re.search(r'^(\[\d{2}:\d{2}:\d{2}\] )?VERSION: port', n)
+        ]
+        if version_notes:
+            lines += [
+                "## 🔍 Detected Service Versions",
+                "",
+                "| Port | Service | Version | Searchsploit |",
+                "|------|---------|---------|--------------|",
+            ]
+            for vn in version_notes:
+                # Strip timestamp
+                clean = re.sub(r'^\[\d{2}:\d{2}:\d{2}\] ', '', vn)
+                # "VERSION: port 22 — openssh 7.4 detected | searchsploit openssh 7.4"
+                m = re.search(
+                    r'VERSION: port (\d+) — (\S+) ([\d.]+) detected \| (searchsploit .+)$',
+                    clean,
+                )
+                if m:
+                    lines.append(
+                        f"| `{m.group(1)}` | {m.group(2)} | `{m.group(3)}` "
+                        f"| `{m.group(4)}` |"
+                    )
+            lines.append("")
+
         # ── SMB Shares ────────────────────────────────────────────────
         if self.info.shares_found:
             # Build access-level dict from notes written by _parse_shares()
@@ -1124,6 +1151,88 @@ class Session:
                 "info",
                 "Domain detected but not confirmed — rerun with --domain flag",
                 f"python3 argus.py {ip} --domain {self.info.domains_found[0]}",
+            ))
+
+        # ── Version-based searchsploit — ALL detected service versions ────────
+        # Iterates every port with a version string from Nmap and generates a
+        # searchsploit hint.  Services already handled with specific logic above
+        # (apache, samba, openssh) are skipped to avoid duplicates.
+        _SPECIFIC_HANDLED = {"apache", "samba", "openssh"}
+
+        # Service name normalisation map: substring → canonical searchsploit term
+        _SVC_NORM: List[Tuple[str, str]] = [
+            ("microsoft iis",   "iis"),
+            ("iis httpd",       "iis"),
+            ("apache httpd",    "apache"),
+            ("apache tomcat",   "tomcat"),
+            ("nginx",           "nginx"),
+            ("proftpd",         "proftpd"),
+            ("vsftpd",          "vsftpd"),
+            ("filezilla",       "filezilla server"),
+            ("openssh",         "openssh"),
+            ("samba",           "samba"),
+            ("postfix",         "postfix"),
+            ("sendmail",        "sendmail"),
+            ("dovecot",         "dovecot"),
+            ("mysql",           "mysql"),
+            ("mariadb",         "mariadb"),
+            ("postgresql",      "postgresql"),
+            ("microsoft sql",   "mssql"),
+            ("ms sql",          "mssql"),
+            ("redis",           "redis"),
+            ("mongodb",         "mongodb"),
+            ("elasticsearch",   "elasticsearch"),
+            ("tomcat",          "tomcat"),
+            ("jboss",           "jboss"),
+            ("weblogic",        "weblogic"),
+            ("glassfish",       "glassfish"),
+            ("jenkins",         "jenkins"),
+            ("wordpress",       "wordpress"),
+            ("drupal",          "drupal"),
+            ("joomla",          "joomla"),
+            ("phpmyadmin",      "phpmyadmin"),
+            ("openssl",         "openssl"),
+            ("openssh",         "openssh"),
+            ("php",             "php"),
+        ]
+
+        for port in sorted(self.info.open_ports):
+            ver_str = self.info.port_details.get(port, {}).get("version", "") or ""
+            # Skip empty, placeholder, or range version strings
+            if not ver_str or ver_str in {"—", "-"} or re.search(r'\d+\.X', ver_str):
+                continue
+
+            # Extract first concrete version number (e.g. "7.4" from "OpenSSH 7.4 protocol 2.0")
+            ver_m = re.search(r'(\d+\.\d+(?:\.\d+)?)', ver_str)
+            if not ver_m:
+                continue
+            version = ver_m.group(1)
+
+            # Normalise service name
+            svc_raw = ver_str.lower()
+            canonical = ""
+            for pattern, name in _SVC_NORM:
+                if pattern in svc_raw:
+                    canonical = name
+                    break
+            if not canonical:
+                # Fallback: first word of the version string
+                canonical = re.split(r'[\s/]', ver_str)[0].lower()
+
+            # Skip services already handled with specific logic
+            if canonical in _SPECIFIC_HANDLED:
+                continue
+
+            dedup_key = f"ss_{canonical}_{version}"
+            if not _once(dedup_key):
+                continue
+
+            ver_mm = ".".join(version.split(".")[:2])   # major.minor only
+            steps.append((
+                "info",
+                f"Port {port} — {canonical} {version} detected: check for known exploits",
+                f"searchsploit {canonical} {version}\n"
+                f"searchsploit {canonical} {ver_mm}",
             ))
 
         return steps

@@ -100,6 +100,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
     _parse_databases(session, log)
     _parse_telnet(session, log)
     _parse_msrpc(session, log)
+    _record_version_notes(session, log)
 
     log.info("Services module complete.")
 
@@ -384,5 +385,107 @@ def _parse_msrpc(session, log) -> None:
         endpoints = re.findall(r"uuid\s+([\w-]+)", nmap_content, re.IGNORECASE)
         if endpoints:
             log.info("MSRPC: %d RPC UUIDs discovered via Nmap", len(endpoints))
+
+
+def _record_version_notes(session, log) -> None:
+    """
+    Iterate ALL port_details and record a version note + searchsploit hint for
+    every service where Nmap detected a specific version string.
+
+    Called once after all service parsers so every discovered version ends up
+    in session.info.notes regardless of which dedicated parser runs.
+
+    Skips:
+      - Empty / placeholder version strings ("—", "-")
+      - Range strings ("3.X - 4.X") — not specific enough for searchsploit
+      - Services already handled by dedicated parsers (apache, samba, openssh)
+        to avoid duplicate notes
+    """
+    # Services handled by dedicated module parsers — skip to avoid duplicates
+    _SKIP = {"apache", "samba", "openssh"}
+
+    # (substring_in_version_lower) → canonical searchsploit term
+    _NORM = [
+        ("microsoft iis",  "iis"),
+        ("iis httpd",      "iis"),
+        ("apache tomcat",  "tomcat"),
+        ("nginx",          "nginx"),
+        ("proftpd",        "proftpd"),
+        ("vsftpd",         "vsftpd"),
+        ("filezilla",      "filezilla server"),
+        ("postfix",        "postfix"),
+        ("sendmail",       "sendmail"),
+        ("dovecot",        "dovecot"),
+        ("exim",           "exim"),
+        ("mysql",          "mysql"),
+        ("mariadb",        "mariadb"),
+        ("postgresql",     "postgresql"),
+        ("microsoft sql",  "mssql"),
+        ("ms-sql",         "mssql"),
+        ("redis",          "redis"),
+        ("mongodb",        "mongodb"),
+        ("elasticsearch",  "elasticsearch"),
+        ("tomcat",         "tomcat"),
+        ("jboss",          "jboss"),
+        ("weblogic",       "weblogic"),
+        ("glassfish",      "glassfish"),
+        ("jenkins",        "jenkins"),
+        ("phpmyadmin",     "phpmyadmin"),
+        ("openssl",        "openssl"),
+        ("php",            "php"),
+        ("wordpress",      "wordpress"),
+        ("drupal",         "drupal"),
+        ("joomla",         "joomla"),
+        ("vnc",            "vnc"),
+        ("rdp",            "rdp"),
+        ("telnet",         "telnet"),
+        ("pure-ftpd",      "pure-ftpd"),
+        ("wsftp",          "wsftp"),
+    ]
+
+    seen: set = set()
+
+    for port in sorted(session.info.open_ports):
+        ver_str = session.info.port_details.get(port, {}).get("version", "") or ""
+
+        # Skip empty, placeholder, or non-specific range versions
+        if not ver_str or ver_str.strip() in {"—", "-", ""}:
+            continue
+        if re.search(r'\d+\.X', ver_str, re.IGNORECASE):
+            continue
+
+        # Must contain at least one concrete version number
+        ver_m = re.search(r'(\d+\.\d+(?:\.\d+)?)', ver_str)
+        if not ver_m:
+            continue
+        version = ver_m.group(1)
+
+        # Normalise to canonical searchsploit term
+        svc_lower = ver_str.lower()
+        canonical = ""
+        for pattern, name in _NORM:
+            if pattern in svc_lower:
+                canonical = name
+                break
+        if not canonical:
+            # Fallback: first word before the version number
+            pre = ver_str[:ver_m.start()].strip()
+            canonical = re.split(r'[\s/]', pre)[-1].lower() if pre else ""
+
+        if not canonical or canonical in _SKIP:
+            continue
+
+        dedup_key = f"{canonical}_{version}"
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        ver_mm = ".".join(version.split(".")[:2])
+        note = (
+            f"VERSION: port {port} — {canonical} {version} detected "
+            f"| searchsploit {canonical} {version}"
+        )
+        session.add_note(note)
+        log.info("Version recorded: port %d — %s %s", port, canonical, version)
 
 
