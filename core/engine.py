@@ -848,6 +848,8 @@ class Engine:
                             success(line[3:].strip())
                         elif line.startswith("[!]"):
                             warn(line[3:].strip())
+                        elif line.startswith("[-]"):
+                            info(line[3:].strip())
                         else:
                             info(line)
                         self.log.debug("exec: %s", line)

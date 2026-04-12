@@ -6,40 +6,41 @@ No ANSI escape codes are hardcoded here.
 """
 
 from rich.console import Console
+from rich.markup import escape
 
 console = Console()
 
 
 def info(msg: str) -> None:
     """[-] in white — general informational line."""
-    console.print(f"[white][-][/white] {msg}")
+    console.print(f"[white][-][/white] {escape(msg)}")
 
 
 def success(msg: str) -> None:
     """[+] in cyan — positive discovery."""
-    console.print(f"[cyan][+][/cyan] {msg}")
+    console.print(f"[cyan][+][/cyan] {escape(msg)}")
 
 
 def done(msg: str) -> None:
     """[✓] in green — task completed."""
-    console.print(f"[green][✓][/green] {msg}")
+    console.print(f"[green][✓][/green] {escape(msg)}")
 
 
 def warn(msg: str) -> None:
     """[!] in yellow — warning or non-fatal issue."""
-    console.print(f"[yellow][!][/yellow] {msg}")
+    console.print(f"[yellow][!][/yellow] {escape(msg)}")
 
 
 def error(msg: str) -> None:
     """[x] in red — error or failure."""
-    console.print(f"[red][x][/red] {msg}")
+    console.print(f"[red][x][/red] {escape(msg)}")
 
 
 def hint(msg: str) -> None:
     """[HINT] block in dim magenta — manual command suggestion."""
     console.print(f"\n[magenta][HINT][/magenta] Run manually:")
     for line in msg.strip().split("\n"):
-        console.print(f"[dim magenta]       {line}[/dim magenta]")
+        console.print(f"[dim magenta]       {escape(line)}[/dim magenta]")
     console.print()
 
 

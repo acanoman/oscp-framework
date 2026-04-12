@@ -67,6 +67,8 @@ def run_wrapper(
                     success(line[3:].strip())
                 elif line.startswith("[!]"):
                     warn(line[3:].strip())
+                elif line.startswith("[-]"):
+                    info(line[3:].strip())
                 else:
                     info(line)
                 log.debug("wrapper: %s", line)
