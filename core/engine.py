@@ -480,6 +480,11 @@ class Engine:
         # last module but the check hasn't fired yet)
         self._check_vuln_scan()
 
+        # ── Attack Path Panel ─────────────────────────────────────────────
+        # Synthesized from ALL findings across ALL modules. Shown last so
+        # the operator sees a single actionable list without scrolling back.
+        self._print_attack_path_panel()
+
         total_elapsed = time.time() - self._run_start
         self.console.print(
             f"\n  [bold green][✓][/bold green] Session complete in "
@@ -489,6 +494,53 @@ class Engine:
         self.log.info(
             "Session complete in %.1fs. Output: %s", total_elapsed, self.session.target_dir
         )
+
+    def _print_attack_path_panel(self) -> None:
+        """
+        Build and print a prioritized attack path panel in the terminal.
+        Shows every manual step the operator should run, ordered critical → info.
+        Nothing here executes automatically.
+        """
+        steps = self.session._build_attack_path()
+        if not steps:
+            return
+
+        _SEV = {
+            "critical": ("[bold red]  🔴 CRITICAL[/bold red]", "red"),
+            "high":     ("[bold yellow]  🟠 HIGH    [/bold yellow]", "yellow"),
+            "medium":   ("[bold cyan]  🟡 MEDIUM  [/bold cyan]", "cyan"),
+            "info":     ("[dim]  🔵 INFO    [/dim]", "white"),
+        }
+
+        lines: List[str] = []
+        current_sev = None
+        for sev, desc, cmd in steps:
+            label, color = _SEV.get(sev, _SEV["info"])
+            if sev != current_sev:
+                if current_sev is not None:
+                    lines.append("")
+                current_sev = sev
+            lines.append(f"{label}  [{color}]{desc}[/{color}]")
+            # Show first line of command only (keep panel compact)
+            first_cmd = cmd.split("\n")[0].strip()
+            lines.append(f"          [dim]{first_cmd}[/dim]")
+
+        self.console.print()
+        self.console.rule(
+            "[bold bright_white] 🎯  ATTACK PATH — RUN THESE MANUALLY  [/bold bright_white]",
+            style="bright_white",
+        )
+        self.console.print()
+        self.console.print(
+            Panel(
+                "\n".join(lines),
+                title="[bold bright_white] PRIORITIZED NEXT STEPS [/bold bright_white]",
+                subtitle="[dim] Full commands + notes.md → see notes/ directory [/dim]",
+                border_style="bright_white",
+                padding=(1, 2),
+            )
+        )
+        self.console.print()
 
     # ------------------------------------------------------------------
     # Internal phases

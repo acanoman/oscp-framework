@@ -199,6 +199,7 @@ def _parse_web_output(port: int, session, log) -> Optional[str]:
     _parse_vhost_scan(web_dir, suffix, session, log)
     _parse_sslscan(web_dir, suffix, session, log)
     _parse_cgi_sniper(web_dir, suffix, session, log)
+    _parse_download_files(web_dir, suffix, session, log)
     return cms
 
 
@@ -536,6 +537,83 @@ def _parse_cgi_sniper(web_dir: Path, suffix: str, session, log) -> None:
             suffix or " 80/443",
             len(session.info.cgi_scripts_found),
         )
+
+
+# ---------------------------------------------------------------------------
+# Download / large file detection
+# ---------------------------------------------------------------------------
+
+def _parse_download_files(web_dir: Path, suffix: str, session, log) -> None:
+    """
+    Scan gobuster/feroxbuster output for paths that look like downloadable files
+    with no extension (e.g. /files/backup, /download/dump) or non-HTML binary
+    extensions (.bin, .img, .iso, .db, .sqlite, .dump, .tar, .tar.gz, .7z).
+
+    For each match: add a manual wget + analysis command to notes so the
+    operator can inspect the file contents offline.
+    No automatic download is performed.
+    """
+    # Patterns that strongly suggest a binary/archive download worth inspecting
+    _DOWNLOAD_NAMES = re.compile(
+        r'/(backup|download|dump|export|loot|migrate|db|database|archive|snapshot'
+        r'|data|files?|documents?|uploads?)(?:/|$)',
+        re.IGNORECASE,
+    )
+    _DOWNLOAD_EXTS = re.compile(
+        r'\.(bin|img|iso|db|sqlite|sqlite3|dump|tar|tar\.gz|tar\.bz2|tgz|7z'
+        r'|dmp|bak|old|backup|mdb|accdb|csv|xml|json)$',
+        re.IGNORECASE,
+    )
+
+    # Reconstruct base URL from session info
+    port_label  = suffix.lstrip("_port") if suffix else "80"
+    port_int    = int(port_label) if port_label.isdigit() else 80
+    proto       = "https" if port_int in {443, 8443, 9443, 4443} else "http"
+    base_url    = (
+        f"{proto}://{session.info.ip}"
+        if port_int in {80, 443}
+        else f"{proto}://{session.info.ip}:{port_int}"
+    )
+
+    seen_dl: set = set()
+    for fname in (f"gobuster{suffix}.txt", f"feroxbuster{suffix}.txt"):
+        fpath = web_dir / fname
+        if not fpath.exists() or fpath.stat().st_size == 0:
+            continue
+
+        for line in fpath.read_text(errors="ignore").splitlines():
+            # Extract path from both gobuster and feroxbuster formats
+            path: Optional[str] = None
+            m_gb = re.match(r'^(/\S+)\s+\(Status:\s*200', line)
+            if m_gb:
+                path = m_gb.group(1).rstrip("/")
+            else:
+                m_fx = re.search(r'(https?://\S+)', line)
+                if m_fx and re.match(r'^200\s', line):
+                    m_p = re.search(r'https?://[^/]+(/.*)', m_fx.group(1))
+                    if m_p:
+                        path = m_p.group(1).rstrip("/")
+
+            if not path or path in seen_dl:
+                continue
+
+            is_download = _DOWNLOAD_NAMES.search(path) or _DOWNLOAD_EXTS.search(path)
+            if not is_download:
+                continue
+
+            seen_dl.add(path)
+            url       = f"{base_url}{path}"
+            filename  = Path(path).name or "loot_file"
+            out_path  = f"/tmp/{filename}"
+
+            log.warning("Potential download/loot file at: %s", url)
+            session.add_note(f"DOWNLOAD FILE: {url}")
+            session.add_note(
+                f"[MANUAL] Download and inspect: "
+                f"wget '{url}' -O {out_path} && "
+                f"file {out_path} && "
+                f"strings {out_path} | grep -iE 'pass|user|admin|secret|key|token' | head -20"
+            )
 
 
 # ---------------------------------------------------------------------------

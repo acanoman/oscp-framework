@@ -97,6 +97,12 @@ def run(target: str, session, dry_run: bool = False) -> None:
     # and surfaces them in notes.md for immediate AS-REP Roasting follow-up.
     _parse_kerbrute_output(ldap_dir, session, log)
 
+    # Parse description fields — often contain plaintext credentials on OSCP
+    _parse_description_fields(ldap_dir, session, log)
+
+    # Credential correlation — if users found, suggest testing against all services
+    _inject_credential_correlation(ldap_dir, session, log)
+
     # OSCP+ COMPLIANT — manual only
     # _check_for_existing_hash_files() is intentionally not called here.
     # The automated kill chain that wrote asreproast.hashes has been removed
@@ -264,6 +270,113 @@ def _parse_kerbrute_output(ldap_dir: Path, session, log) -> None:
         f"-usersfile {ldap_dir / 'ldap_users.txt'} "
         f"-outputfile {ldap_dir / 'asrep_hashes.txt'}"
     )
+
+
+def _parse_description_fields(ldap_dir: Path, session, log) -> None:
+    """
+    Parse ldap_descriptions.txt for accounts with description fields.
+    On OSCP, it is extremely common for admins to store passwords in the
+    LDAP description attribute. Flag any non-trivial description value.
+    """
+    desc_file = ldap_dir / "ldap_descriptions.txt"
+    if not desc_file.exists() or desc_file.stat().st_size == 0:
+        return
+
+    content = desc_file.read_text(errors="ignore")
+    # Count accounts with descriptions
+    desc_count = len(re.findall(r'^description:', content, re.MULTILINE))
+    if desc_count == 0:
+        return
+
+    log.warning(
+        "LDAP: %d account(s) have description fields — review for embedded passwords",
+        desc_count,
+    )
+    session.add_note(
+        f"HIGH: {desc_count} LDAP account(s) have description fields "
+        f"— check for embedded passwords: "
+        f"grep -A1 'sAMAccountName:' {desc_file} | grep -v '^--$'"
+    )
+
+    # Extract and flag any description that looks like it might be a password
+    # (contains uppercase + lowercase + digits or special chars — classic password pattern)
+    _PASS_LIKE = re.compile(r'(?=[^a-z]*[a-z])(?=[^A-Z]*[A-Z])(?=\D*\d).{6,}')
+    for line in content.splitlines():
+        if line.startswith("description:"):
+            value = line.split(":", 1)[-1].strip()
+            if _PASS_LIKE.match(value):
+                log.warning("LDAP description may contain a password: %s", value[:60])
+                session.add_note(
+                    f"CRITICAL: LDAP description field looks like a password: '{value[:80]}'"
+                )
+
+
+def _inject_credential_correlation(ldap_dir: Path, session, log) -> None:
+    """
+    When LDAP enumeration confirms users, inject manual commands to test those
+    credentials against every open service. These commands are NEVER run
+    automatically — they land in the [MANUAL] section of notes.md.
+    """
+    if not session.info.users_found:
+        return
+
+    ip         = session.info.ip
+    domain     = session.info.domain or ""
+    users_file = session.target_dir / "users.txt"
+    uf         = str(users_file) if users_file.exists() else str(ldap_dir / "ldap_users.txt")
+    open_ports = session.info.open_ports
+
+    log.info(
+        "Credential correlation: %d LDAP users confirmed — injecting spray hints "
+        "for open services: %s",
+        len(session.info.users_found),
+        sorted(open_ports & {22, 139, 445, 1433, 3306, 3389, 5432, 5985, 5986}),
+    )
+
+    # Kerberoasting — must have valid credentials, but any domain user works
+    if domain and 88 in open_ports:
+        session.add_note(
+            f"[MANUAL] Kerberoast (needs ANY valid domain creds): "
+            f"impacket-GetUserSPNs {domain}/<USER>:<PASS> -dc-ip {ip} "
+            f"-request -outputfile {ldap_dir}/kerberoast_hashes.txt"
+        )
+        session.add_note(
+            f"[MANUAL] Crack Kerberoast hashes: "
+            f"hashcat -m 13100 {ldap_dir}/kerberoast_hashes.txt "
+            f"/usr/share/wordlists/rockyou.txt"
+        )
+
+    # BloodHound collection — map the entire AD graph
+    if session.info.is_domain_controller and domain:
+        session.add_note(
+            f"[MANUAL] BloodHound collection (once ANY creds found): "
+            f"bloodhound-python -u <USER> -p <PASS> -d {domain} -ns {ip} -c All"
+        )
+
+    # Per-service spray with confirmed LDAP userlist
+    if 445 in open_ports or 139 in open_ports:
+        session.add_note(
+            f"[MANUAL] Spray LDAP users against SMB: "
+            f"crackmapexec smb {ip} -u {uf} "
+            f"-p /usr/share/wordlists/rockyou.txt --no-bruteforce --continue-on-success"
+        )
+    if 5985 in open_ports or 5986 in open_ports:
+        session.add_note(
+            f"[MANUAL] WinRM access test (once creds found): "
+            f"evil-winrm -i {ip} -u <USER> -p <PASS>"
+        )
+    if 3389 in open_ports:
+        session.add_note(
+            f"[MANUAL] RDP access test: "
+            f"xfreerdp /v:{ip} /u:<USER> /p:<PASS> /cert-ignore"
+        )
+
+    # Pass-the-Hash reminder if the target is Windows
+    if session.info.os_type == "Windows":
+        session.add_note(
+            f"[MANUAL] Pass-the-Hash (once NTLM hash obtained): "
+            f"crackmapexec smb {ip} -u <USER> -H <NTLM_HASH> --continue-on-success"
+        )
 
 
 def _check_for_existing_hash_files(ldap_dir: Path, session, log) -> None:  # IMP-5 applied
