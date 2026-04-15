@@ -126,28 +126,42 @@ because a secondary tool is missing.
 git clone https://github.com/acanoman/oscp-framework
 cd oscp-framework
 
-# 2. Run the installer
+# 2. Run the installer (creates .venv/, installs pip packages, generates run.sh)
 sudo bash install.sh
 
-# 3. Run
-./run.sh --target <IP>
+# 3. Run — always use run.sh, it uses the project virtualenv automatically
+./run.sh --target <IP> --lhost <LHOST>
 ```
 
 `install.sh` creates a `.venv/` Python virtual environment, installs pip
-packages into it, sets `+x` on all wrappers, and checks which optional tools
-are available. At the end it writes `run.sh` — a one-line launcher that calls
-`.venv/bin/python main.py` directly, so you never need to activate the venv
-manually. All tool checks are non-fatal — missing optional tools are reported
-as warnings, not errors.
+packages into it, sets `+x` on all wrappers, checks which optional tools
+are available, and generates `run.sh` — a one-line launcher that calls
+`.venv/bin/python main.py` directly.
+
+**`./run.sh` is the correct entry point.** Use it for every run.
+`python main.py` also works if you activate the venv first:
+
+```bash
+source .venv/bin/activate
+python main.py --target <IP> --lhost <LHOST>
+```
+
+All tool checks are non-fatal — missing optional tools are reported as
+warnings, not errors.
 
 ---
 
 ## Usage
 
+> **Use `./run.sh` after installing** — it automatically uses the project
+> virtualenv created by `install.sh`. `python main.py` only works if the venv
+> is active (`source .venv/bin/activate`) or if the pip packages are installed
+> globally.
+
 ### Standard exam run
 
 ```bash
-python main.py --target 10.10.10.5 --lhost 10.10.14.5
+./run.sh --target 10.10.10.5 --lhost 10.10.14.5
 ```
 
 `--lhost` pre-fills every `<LHOST>` placeholder in transfer and reverse-shell
@@ -156,7 +170,7 @@ commands inside `notes.md`, making them copy-paste ready without manual editing.
 ### With a known AD domain
 
 ```bash
-python main.py --target 10.10.10.5 --domain corp.local --lhost 10.10.14.5
+./run.sh --target 10.10.10.5 --domain corp.local --lhost 10.10.14.5
 ```
 
 Passes the domain to LDAP, SMB, DNS, kerbrute, and web modules so they all
@@ -165,7 +179,7 @@ operate with the correct base DN and hostname context.
 ### Resume an interrupted session
 
 ```bash
-python main.py --target 10.10.10.5 --resume --lhost 10.10.14.5
+./run.sh --target 10.10.10.5 --resume --lhost 10.10.14.5
 ```
 
 Re-reads `session.json`, skips Nmap and completed modules, and continues from
@@ -175,7 +189,7 @@ where the scan stopped. Without `--resume` a fresh scan always starts even if
 ### Preview every command without running anything
 
 ```bash
-python main.py --target 10.10.10.5 --dry-run
+./run.sh --target 10.10.10.5 --dry-run
 ```
 
 Prints the exact shell command that *would* run at each step. Safe for scope
@@ -184,7 +198,7 @@ review, auditing, or extracting individual commands for manual execution.
 ### Force specific modules only
 
 ```bash
-python main.py --target 10.10.10.5 --modules smb ldap web
+./run.sh --target 10.10.10.5 --modules smb ldap web
 ```
 
 Skips auto-detection and runs exactly the listed modules in tier order.
@@ -192,7 +206,7 @@ Skips auto-detection and runs exactly the listed modules in tier order.
 ### Quick mode — OSCP exam first pass
 
 ```bash
-python main.py --target 10.10.10.5 --quick --lhost 10.10.14.5
+./run.sh --target 10.10.10.5 --quick --lhost 10.10.14.5
 ```
 
 `--quick` caps every module at **120 seconds** and then moves on. Use this
@@ -202,7 +216,7 @@ then run a second full pass (without `--quick`) on the most promising targets.
 ### Custom output directory
 
 ```bash
-python main.py --target 10.10.10.5 --output-dir /root/oscp/exam --lhost 10.10.14.5
+./run.sh --target 10.10.10.5 --output-dir /root/oscp/exam --lhost 10.10.14.5
 ```
 
 ### All flags
