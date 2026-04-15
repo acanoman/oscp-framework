@@ -456,13 +456,14 @@ GB_QUICK_OUT="${WEB_DIR}/gobuster${SUFFIX}.txt"
 
 if command -v gobuster &>/dev/null; then
     if [[ -n "$WL_QUICK" ]]; then
-        cmd "gobuster dir -u $BASE_URL -w $WL_QUICK -x $ENUM_EXTS -t 50 --no-error -k"
+        cmd "gobuster dir -u $BASE_URL -w $WL_QUICK -x $ENUM_EXTS -t 50 --no-error -k -b 403,404"
         gobuster dir \
             -u "$BASE_URL" \
             -w "$WL_QUICK" \
             -x "$ENUM_EXTS" \
             -t 50 --no-error -k \
             --exclude-length 0 \
+            -b "403,404" \
             -o "$GB_QUICK_OUT" 2>&1 | tee "${GB_QUICK_OUT}.log" || true
         ok "Gobuster quick done → ${WHITE}${GB_QUICK_OUT}${NC}"
     else
@@ -483,13 +484,13 @@ FEROX_OUT="${WEB_DIR}/feroxbuster${SUFFIX}.txt"
 
 if command -v feroxbuster &>/dev/null; then
     if [[ -n "$WL_MEDIUM" ]]; then
-        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403"
+        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403,404,400"
         feroxbuster \
             -u "$BASE_URL" \
             -w "$WL_MEDIUM" \
             -x "$ENUM_EXTS" \
             -t 50 -k -q -d 2 \
-            --filter-status 403 \
+            --filter-status 403,404,400 \
             --no-state \
             -o "$FEROX_OUT" < /dev/null 2>&1 | tee "${FEROX_OUT}.log" || true
         ok "Feroxbuster done → ${WHITE}${FEROX_OUT}${NC}"
@@ -500,13 +501,14 @@ if command -v feroxbuster &>/dev/null; then
 elif [[ -n "$WL_MEDIUM" ]] && command -v gobuster &>/dev/null; then
     # Fallback to gobuster deep if feroxbuster not available
     info "Feroxbuster not found — running gobuster with medium wordlist as fallback."
-    cmd "gobuster dir -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 --no-error -k"
+    cmd "gobuster dir -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 --no-error -k -b 403,404"
     gobuster dir \
         -u "$BASE_URL" \
         -w "$WL_MEDIUM" \
         -x "$ENUM_EXTS" \
         -t 50 --no-error -k \
         --exclude-length 0 \
+        -b "403,404" \
         -o "$FEROX_OUT" 2>&1 | tee "${FEROX_OUT}.log" || true
     ok "Gobuster deep done → ${WHITE}${FEROX_OUT}${NC}"
 else
