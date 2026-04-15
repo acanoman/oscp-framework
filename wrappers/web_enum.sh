@@ -131,6 +131,41 @@ echo -e "  ${BOLD}============================================================${
 echo ""
 
 # ===========================================================================
+# Per-step interrupt handler
+#
+# Ctrl+C (first)  → kills the currently running tool (feroxbuster, nikto…),
+#                   prints a skip notice, and continues to the next step.
+# Ctrl+C (second, within SKIP_ABORT_WINDOW seconds) → exits the script so
+#                   runner.py's second-interrupt logic can abort the module.
+#
+# Implementation:
+#   bash defers SIGINT while a foreground child is running.  When the child
+#   exits (killed by the same SIGINT that runner.py forwarded), bash runs
+#   _sigint_step().  STEP_SKIPPED is checked/reset at the start of each step
+#   that wants to announce it was skipped.
+# ===========================================================================
+STEP_SKIPPED=false
+_LAST_SIGINT_TS=0
+SKIP_ABORT_WINDOW=5
+
+_sigint_step() {
+    local now
+    now=$(date +%s)
+    if (( now - _LAST_SIGINT_TS < SKIP_ABORT_WINDOW )); then
+        # Second Ctrl+C within the abort window — exit so runner.py kills group
+        warn "Second Ctrl+C — aborting web enumeration for ${TARGET}:${PORT}"
+        exit 130
+    fi
+    _LAST_SIGINT_TS=$now
+    STEP_SKIPPED=true
+    echo ""
+    warn "⚡ Step interrupted — continuing to next step"
+    warn "   (press Ctrl+C again within ${SKIP_ABORT_WINDOW}s to abort entire module)"
+    echo ""
+}
+trap '_sigint_step' INT
+
+# ===========================================================================
 # 0 — Instant fingerprint (3s timeout — always runs before Ctrl+C is possible)
 #     Identifies the application BEFORE feroxbuster so early aborts still have
 #     useful data.  Written to quick_fingerprint<SUFFIX>.txt immediately.
