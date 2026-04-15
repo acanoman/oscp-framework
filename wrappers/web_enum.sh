@@ -477,63 +477,24 @@ fi
 echo ""
 
 # ===========================================================================
-# 5 — Feroxbuster — recursive deep scan (medium wordlist)
-# ===========================================================================
-info "[5/10] Feroxbuster — recursive deep scan (medium wordlist)"
-FEROX_OUT="${WEB_DIR}/feroxbuster${SUFFIX}.txt"
-
-if command -v feroxbuster &>/dev/null; then
-    if [[ -n "$WL_MEDIUM" ]]; then
-        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403,404,400"
-        feroxbuster \
-            -u "$BASE_URL" \
-            -w "$WL_MEDIUM" \
-            -x "$ENUM_EXTS" \
-            -t 50 -k -q -d 2 \
-            --filter-status 403,404,400 \
-            --no-state \
-            -o "$FEROX_OUT" < /dev/null 2>&1 | tee "${FEROX_OUT}.log" || true
-        ok "Feroxbuster done → ${WHITE}${FEROX_OUT}${NC}"
-    else
-        warn "No medium wordlist found. Install dirbuster wordlists or seclists."
-        touch "$FEROX_OUT"
-    fi
-elif [[ -n "$WL_MEDIUM" ]] && command -v gobuster &>/dev/null; then
-    # Fallback to gobuster deep if feroxbuster not available
-    info "Feroxbuster not found — running gobuster with medium wordlist as fallback."
-    cmd "gobuster dir -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 --no-error -k -b 403,404"
-    gobuster dir \
-        -u "$BASE_URL" \
-        -w "$WL_MEDIUM" \
-        -x "$ENUM_EXTS" \
-        -t 50 --no-error -k \
-        --exclude-length 0 \
-        -b "403,404" \
-        -o "$FEROX_OUT" 2>&1 | tee "${FEROX_OUT}.log" || true
-    ok "Gobuster deep done → ${WHITE}${FEROX_OUT}${NC}"
-else
-    skip "feroxbuster and gobuster"
-    touch "$FEROX_OUT"
-fi
-echo ""
-
-# ===========================================================================
-# 6 — Dynamic CGI/Script Sniper
+# 5 — Dynamic CGI/Script Sniper
 #
-# Purpose: avoid the hardcoded /cgi-bin/ antipattern.  Instead, parse every
-# directory that the main scans already found (any status 200/301/403) and
-# run a fast targeted scan looking for executable scripts (.cgi .sh .pl) in
-# each one.  All hits are appended to a single output file for the Python
-# parser to consume and convert into a Shellshock exploitation template.
+# Runs BEFORE the slow recursive scan so Ctrl+C on feroxbuster never loses
+# CGI results.  Parses gobuster output + always scans "/" as baseline.
+# Feroxbuster output ($FEROX_OUT) is checked only if it already exists
+# (it won't on first pass — that's fine, "/" covers the common cases).
 #
 # Wordlist priority:
 #   1. seclists CGIs.txt  (purpose-built, ~3 k entries)
 #   2. dirb common.txt    (fallback — broader but still fast)
 # ===========================================================================
-info "[6/10] Dynamic CGI/Script Sniper — hunting scripts in discovered directories"
+info "[5/10] Dynamic CGI/Script Sniper — hunting scripts in discovered directories"
 
 CGI_SNIPER_OUT="${WEB_DIR}/dynamic_cgi_sniper${SUFFIX}.txt"
 > "$CGI_SNIPER_OUT"   # reset output file
+
+# Declare early so the feroxbuster guard below doesn't hit unbound-var
+FEROX_OUT="${WEB_DIR}/feroxbuster${SUFFIX}.txt"
 
 WL_CGI=""
 for f in \
@@ -548,7 +509,7 @@ elif ! command -v feroxbuster &>/dev/null; then
     warn "feroxbuster not installed — skipping CGI sniper."
 else
     # ------------------------------------------------------------------
-    # Collect unique directory paths from both scan output files.
+    # Collect unique directory paths from scan output files.
     # Gobuster format  : "/path/   (Status: 200)"
     # Feroxbuster format: "200 GET ... http://host/path/"
     # We keep the BASE_URL-relative path only and always include "/" as
@@ -562,6 +523,7 @@ else
         fi
 
         # Feroxbuster: strip host prefix from URLs ending with /
+        # (will be empty at step 5 — populated if CGI sniper re-runs later)
         if [[ -s "$FEROX_OUT" ]]; then
             grep -oP 'https?://\S+/' "$FEROX_OUT" 2>/dev/null \
                 | sed "s|${BASE_URL}||g" \
@@ -602,6 +564,71 @@ fi
 echo ""
 
 # ===========================================================================
+# 6 — Nikto (safe web scan)
+# Runs BEFORE feroxbuster — fast enough that Ctrl+C on the deep scan won't
+# lose nikto results.
+# ===========================================================================
+info "[6/10] Nikto — web vulnerability scan (max 15 min)"
+NIKTO_OUT="${WEB_DIR}/nikto${SUFFIX}.txt"
+NIKTO_SSL=""
+[[ "$PROTO" == "https" ]] && NIKTO_SSL="-ssl"
+
+if command -v nikto &>/dev/null; then
+    cmd "nikto -h $TARGET -port $PORT $NIKTO_SSL -ask no -maxtime 900 -timeout 10"
+    nikto -h "$TARGET" -port "$PORT" $NIKTO_SSL \
+        -ask no -maxtime 900 -timeout 10 \
+        -Format txt -output "$NIKTO_OUT" 2>&1 | tee "${NIKTO_OUT}.log" || true
+    # Nikto sometimes appends .txt.txt
+    [[ -f "${NIKTO_OUT}.txt" ]] && mv "${NIKTO_OUT}.txt" "$NIKTO_OUT" 2>/dev/null || true
+    ok "Nikto done → ${WHITE}${NIKTO_OUT}${NC}"
+else
+    skip "nikto"
+    touch "$NIKTO_OUT"
+fi
+echo ""
+
+# ===========================================================================
+# 7 — Feroxbuster — recursive deep scan (medium wordlist)
+# Placed AFTER CGI sniper and Nikto — safe to Ctrl+C without losing results.
+# ===========================================================================
+info "[7/10] Feroxbuster — recursive deep scan (medium wordlist)"
+
+if command -v feroxbuster &>/dev/null; then
+    if [[ -n "$WL_MEDIUM" ]]; then
+        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403,404,400"
+        feroxbuster \
+            -u "$BASE_URL" \
+            -w "$WL_MEDIUM" \
+            -x "$ENUM_EXTS" \
+            -t 50 -k -q -d 2 \
+            --filter-status 403,404,400 \
+            --no-state \
+            -o "$FEROX_OUT" < /dev/null 2>&1 | tee "${FEROX_OUT}.log" || true
+        ok "Feroxbuster done → ${WHITE}${FEROX_OUT}${NC}"
+    else
+        warn "No medium wordlist found. Install dirbuster wordlists or seclists."
+        touch "$FEROX_OUT"
+    fi
+elif [[ -n "$WL_MEDIUM" ]] && command -v gobuster &>/dev/null; then
+    # Fallback to gobuster deep if feroxbuster not available
+    info "Feroxbuster not found — running gobuster with medium wordlist as fallback."
+    cmd "gobuster dir -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 --no-error -k -b 403,404"
+    gobuster dir \
+        -u "$BASE_URL" \
+        -w "$WL_MEDIUM" \
+        -x "$ENUM_EXTS" \
+        -t 50 --no-error -k \
+        --exclude-length 0 \
+        -b "403,404" \
+        -o "$FEROX_OUT" 2>&1 | tee "${FEROX_OUT}.log" || true
+    ok "Gobuster deep done → ${WHITE}${FEROX_OUT}${NC}"
+else
+    skip "feroxbuster and gobuster"
+    touch "$FEROX_OUT"
+fi
+echo ""
+
+# ===========================================================================
 # 7 — Virtual host fuzzing
 # Runs if --domain was passed OR if a hostname was auto-detected from
 # TLS SANs / HTTP redirects (both stored in discovered_hostnames.txt)
@@ -617,7 +644,7 @@ if [[ -z "$EFFECTIVE_DOMAIN" ]] && [[ -f "${WEB_DIR}/discovered_hostnames.txt" ]
 fi
 
 if [[ -n "$EFFECTIVE_DOMAIN" ]]; then
-    info "[7/10] Virtual host fuzzing (Host header enumeration)"
+    info "[8/10] Virtual host fuzzing (Host header enumeration)"
 
     if [[ -z "$WL_VHOST" ]]; then
         warn "No vhost wordlist found — skipping vhost fuzzing."
@@ -673,7 +700,7 @@ if [[ -n "$EFFECTIVE_DOMAIN" ]]; then
     fi
 
 else
-    info "[7/10] No domain supplied and no hostname auto-detected — skipping vhost enumeration."
+    info "[8/10] No domain supplied and no hostname auto-detected — skipping vhost enumeration."
     hint "If you discover a hostname/domain, rerun with:
     bash wrappers/web_enum.sh --target ${TARGET} --output-dir <DIR> --port ${PORT} --domain <DOMAIN>"
 fi
@@ -692,7 +719,7 @@ echo ""
 SSLSCAN_OUT="${WEB_DIR}/sslscan${SUFFIX}.txt"
 
 if [[ "$PROTO" == "https" ]]; then
-    info "[8/10] sslscan — TLS/SSL configuration audit"
+    info "[9/10] sslscan — TLS/SSL configuration audit"
 
     if command -v sslscan &>/dev/null; then
         cmd "sslscan --no-colour ${TARGET}:${PORT}"
@@ -715,34 +742,12 @@ if [[ "$PROTO" == "https" ]]; then
     Then run: sslscan --no-colour ${TARGET}:${PORT} > ${SSLSCAN_OUT}"
     fi
 else
-    info "[8/10] HTTP port — sslscan skipped (HTTPS only)"
+    info "[9/10] HTTP port — sslscan skipped (HTTPS only)"
 fi
 echo ""
 
 # ===========================================================================
-# 9 — Nikto (safe web scan)
-# ===========================================================================
-info "[9/10] Nikto — web vulnerability scan (max 15 min)"
-NIKTO_OUT="${WEB_DIR}/nikto${SUFFIX}.txt"
-NIKTO_SSL=""
-[[ "$PROTO" == "https" ]] && NIKTO_SSL="-ssl"
-
-if command -v nikto &>/dev/null; then
-    cmd "nikto -h $TARGET -port $PORT $NIKTO_SSL -ask no -maxtime 900 -timeout 10"
-    nikto -h "$TARGET" -port "$PORT" $NIKTO_SSL \
-        -ask no -maxtime 900 -timeout 10 \
-        -Format txt -output "$NIKTO_OUT" 2>&1 | tee "${NIKTO_OUT}.log" || true
-    # Nikto sometimes appends .txt.txt
-    [[ -f "${NIKTO_OUT}.txt" ]] && mv "${NIKTO_OUT}.txt" "$NIKTO_OUT" 2>/dev/null || true
-    ok "Nikto done → ${WHITE}${NIKTO_OUT}${NC}"
-else
-    skip "nikto"
-    touch "$NIKTO_OUT"
-fi
-echo ""
-
-# ===========================================================================
-# 8 — Manual-only hints (NO automation for these)
+# 10 — Manual-only hints (NO automation for these)
 # ===========================================================================
 info "[10/10] Additional manual steps required"
 
