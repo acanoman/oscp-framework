@@ -6,15 +6,34 @@ private _exec() functions.  Using Popen with start_new_session=True means the
 bash wrapper and every child it spawns (nmap, feroxbuster, gobuster …) share
 a single process group — one os.killpg() call reaches all grandchildren on
 Ctrl+C, preventing orphaned background scan processes from consuming RAM.
+
+Every command executed (or dry-run previewed) is appended to _commands.log
+inside the target directory so the operator has a complete audit trail.
 """
 
 import os
 import signal
 import subprocess
+import threading
 from subprocess import PIPE, STDOUT
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from core.display import info, success, warn, error
+
+
+def _append_commands_log(session, display: str, dry_run: bool) -> None:
+    """Append one command line to <target_dir>/_commands.log."""
+    try:
+        prefix = "[DRY-RUN]" if dry_run else "[CMD]"
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {prefix} {display}\n"
+        commands_log: Path = session.target_dir / "_commands.log"
+        with commands_log.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass  # never let logging failures break a scan
 
 
 def run_wrapper(
@@ -22,6 +41,7 @@ def run_wrapper(
     session,
     label: str = "",
     dry_run: bool = False,
+    timeout: Optional[int] = None,
 ) -> int:
     """
     Execute *cmd* in its own process group, stream output to the terminal,
@@ -32,14 +52,21 @@ def run_wrapper(
     caller can decide how to react (e.g. web.py skips to the next port;
     other modules let it propagate to the engine).
 
+    Every invocation is logged to <target_dir>/_commands.log regardless of
+    the dry_run flag so the operator always has a full audit trail.
+
     Args:
         cmd:     Command list passed to Popen (e.g. ["bash", "wrapper.sh", ...]).
         session: Active Session object — session.log is used for all output.
         label:   Human-readable name for warning messages (defaults to cmd[0]).
         dry_run: If True, log the command but do not execute it.
+        timeout: Optional hard timeout in seconds.  The process group is killed
+                 and -2 is returned if the subprocess exceeds this limit.
+                 None means no timeout (default behaviour).
 
     Returns:
-        Exit code of the subprocess, or -1 if the binary was not found.
+        Exit code of the subprocess, or -1 if the binary was not found,
+        or -2 if the timeout was exceeded.
         Returns 0 immediately when dry_run is True.
     """
     log = session.log
@@ -48,10 +75,32 @@ def run_wrapper(
     log.info("%s %s", prefix, display)
     info(f"> {display}")
 
+    # Always write to _commands.log — even dry-run previews are useful
+    _append_commands_log(session, display, dry_run)
+
+    # Use session.module_timeout as fallback when no explicit timeout given
+    if timeout is None:
+        timeout = getattr(session, "module_timeout", None)
+
     if dry_run:
         return 0
 
     proc: Optional[subprocess.Popen] = None
+    _timed_out = False
+
+    def _timeout_killer():
+        """Background thread: kill process group when timeout expires."""
+        nonlocal _timed_out
+        _timed_out = True
+        warn(
+            f"{label or cmd[0]} exceeded {timeout}s timeout — killing process group"
+        )
+        log.warning(
+            "%s exceeded %ds timeout — killing process group",
+            label or cmd[0], timeout,
+        )
+        _kill_proc_group(proc, log)
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -60,19 +109,33 @@ def run_wrapper(
             text=True,
             start_new_session=True,
         )
-        for raw_line in proc.stdout:  # type: ignore[union-attr]
-            line = raw_line.strip()
-            if line:
-                if line.startswith("[+]"):
-                    success(line[3:].strip())
-                elif line.startswith("[!]"):
-                    warn(line[3:].strip())
-                elif line.startswith("[-]"):
-                    info(line[3:].strip())
-                else:
-                    info(line)
-                log.debug("wrapper: %s", line)
-        proc.wait()
+
+        timer: Optional[threading.Timer] = None
+        if timeout is not None:
+            timer = threading.Timer(timeout, _timeout_killer)
+            timer.daemon = True
+            timer.start()
+
+        try:
+            for raw_line in proc.stdout:  # type: ignore[union-attr]
+                line = raw_line.strip()
+                if line:
+                    if line.startswith("[+]"):
+                        success(line[3:].strip())
+                    elif line.startswith("[!]"):
+                        warn(line[3:].strip())
+                    elif line.startswith("[-]"):
+                        info(line[3:].strip())
+                    else:
+                        info(line)
+                    log.debug("wrapper: %s", line)
+            proc.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
+
+        if _timed_out:
+            return -2
 
         rc = proc.returncode if proc.returncode is not None else 0
         if rc != 0:

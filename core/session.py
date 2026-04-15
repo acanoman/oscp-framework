@@ -251,7 +251,7 @@ class TargetInfo:
     domains_found: List[str]             = field(default_factory=list)
     shares_found:  List[str]             = field(default_factory=list)
     web_paths:     List[str]             = field(default_factory=list)
-    users_found:   List[str]             = field(default_factory=list)
+    users_found:   List[str]             = field(default_factory=list)  # deduped on save
     notes:         List[str]             = field(default_factory=list)
     # Ports the user explicitly skipped with Ctrl+C during a previous run.
     # Persisted so --resume does not endlessly retry aborted scans.
@@ -377,6 +377,11 @@ class Session:
         self.lhost       = lhost
         self.resume      = resume
 
+        # Active timeout (seconds) set by the engine before each module call.
+        # run_wrapper uses this as a fallback when no explicit timeout is given.
+        # None means no timeout (unlimited).
+        self.module_timeout: Optional[int] = None
+
         self.target_dir: Path = self.output_base / target
         self.started_at: str  = datetime.now(timezone.utc).isoformat()
 
@@ -410,7 +415,11 @@ class Session:
 
         Also writes output/targets/<IP>/users.txt whenever users_found is
         non-empty so spray tools can reference it immediately.
+        Deduplicates users_found in-place before saving.
         """
+        # Deduplicate users in-place (preserving insertion order via dict)
+        self.info.users_found = list(dict.fromkeys(self.info.users_found))
+
         state_path = self.target_dir / STATE_FILE
         with state_path.open("w") as fh:
             json.dump(self.info.to_dict(), fh, indent=2)
@@ -420,7 +429,7 @@ class Session:
         if self.info.users_found:
             users_path = self.target_dir / "users.txt"
             users_path.write_text(
-                "\n".join(sorted(set(self.info.users_found))) + "\n",
+                "\n".join(sorted(self.info.users_found)) + "\n",
                 encoding="utf-8",
             )
             self.log.debug("users.txt updated (%d users) → %s",
@@ -431,6 +440,26 @@ class Session:
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {text}"
         self.info.notes.append(line)
+
+    def add_manual_command(self, cmd: str, context: str = "") -> None:
+        """Append a manual command to <target_dir>/_manual_commands.txt.
+
+        This file collects every [MANUAL] hint emitted during the run so the
+        operator has a single, copy-paste-ready reference without having to
+        scroll through notes.md or terminal output.
+
+        Args:
+            cmd:     The exact shell command the operator should run manually.
+            context: Short description explaining why this command is suggested.
+        """
+        try:
+            manual_file: Path = self.target_dir / "_manual_commands.txt"
+            with manual_file.open("a", encoding="utf-8") as fh:
+                if context:
+                    fh.write(f"# {context}\n")
+                fh.write(f"{cmd}\n\n")
+        except Exception:
+            pass  # never let file I/O block a scan
 
     def finalize_notes(self) -> None:
         """

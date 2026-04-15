@@ -284,6 +284,29 @@ MODULE_TIERS: Dict[str, int] = {
 }
 _DEFAULT_TIER = 1  # unknown modules are treated as Tier 1 (fast)
 
+# ---------------------------------------------------------------------------
+# Per-module hard timeouts (seconds).
+# These prevent indefinitely-running scans from blocking the exam clock.
+# web gets 3600 s (1 h) because feroxbuster can be genuinely slow on large
+# sites; all others cap at sensible values for OSCP machines.
+# Override with --quick which applies a flat 120 s limit to every module.
+# ---------------------------------------------------------------------------
+MODULE_TIMEOUTS: Dict[str, int] = {
+    "web":       3600,   # 1 h  — feroxbuster/nikto/wpscan can be slow
+    "smb":        600,   # 10 m — enum4linux + nxc RID cycling
+    "ldap":       600,   # 10 m — full LDAP dump can be large
+    "snmp":       300,   # 5 m  — onesixtyone sweep
+    "ftp":        180,   # 3 m
+    "dns":        180,   # 3 m
+    "nfs":        180,   # 3 m
+    "services":   300,   # 5 m
+    "network":    120,   # 2 m
+    "databases":  300,   # 5 m
+    "remote":     180,   # 3 m
+    "mail":       180,   # 3 m
+}
+_QUICK_TIMEOUT = 120  # --quick: flat 2-minute limit per module
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -316,6 +339,7 @@ class Engine:
         forced_modules: Optional[List[str]] = None,
         lhost:          str         = "",
         resume:         bool        = False,
+        quick:          bool        = False,
     ) -> None:
         self.target         = target
         self.domain         = domain
@@ -324,6 +348,7 @@ class Engine:
         self.forced_modules = forced_modules or []
         self.lhost          = lhost
         self.resume         = resume
+        self.quick          = quick
 
         # Timing — set at the start of _run_inner()
         self._run_start: float = 0.0
@@ -421,6 +446,13 @@ class Engine:
             ),
         }
 
+        if self.quick:
+            warn(
+                f"--quick mode: each module will be aborted after "
+                f"{_QUICK_TIMEOUT}s — run without --quick for full depth."
+            )
+            self.log.info("Quick mode active — %ds timeout per module", _QUICK_TIMEOUT)
+
         current_tier = 0
         for module_name in modules_to_run:
             tier = MODULE_TIERS.get(module_name, _DEFAULT_TIER)
@@ -434,6 +466,15 @@ class Engine:
                 self.console.rule(rule_label, style=rule_style)
                 self.console.print()
                 self.log.info("--- Tier %d modules starting ---", tier)
+
+            # Resolve timeout: --quick → flat limit; else per-module default
+            mod_timeout = (
+                _QUICK_TIMEOUT if self.quick
+                else MODULE_TIMEOUTS.get(module_name)
+            )
+            # Store on session so run_wrapper picks it up without needing a
+            # new argument on every module's run() signature.
+            self.session.module_timeout = mod_timeout
 
             mod_start_time = time.time()
             try:

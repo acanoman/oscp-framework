@@ -108,6 +108,15 @@ Examples:
         action="store_true",
         help="Verbose output — show DEBUG-level log messages.",
     )
+    parser.add_argument(
+        "--quick", "-q",
+        action="store_true",
+        help=(
+            "Quick mode — abort each module after 120 s and move to the next. "
+            "Useful for OSCP exam: do a fast first pass over all machines, "
+            "then run a second full pass on promising targets."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -126,6 +135,7 @@ def main() -> None:
         forced_modules=args.modules,
         lhost=args.lhost,
         resume=args.resume,
+        quick=args.quick,
     )
 
     try:

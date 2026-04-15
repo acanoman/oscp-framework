@@ -555,12 +555,18 @@ if has_udp_port 161; then
     [[ ! -f "$SNMP_WL" ]] && \
         SNMP_WL="/usr/share/wordlists/snmp.txt"
 
+    if [[ ! -f "$SNMP_WL" ]]; then
+        warn "No SNMP community wordlist found — skipping onesixtyone sweep."
+        warn "Install seclists: sudo apt install seclists"
+        warn "Trying snmpwalk with default 'public' community anyway."
+    fi
+
     if command -v onesixtyone &>/dev/null && [[ -f "$SNMP_WL" ]]; then
         cmd "onesixtyone -c $SNMP_WL $TARGET"
         onesixtyone -c "$SNMP_WL" "$TARGET" \
             2>&1 | tee "${SNMP_DIR}/communities.txt" || true
     else
-        warn "onesixtyone not found — trying snmpwalk with 'public' directly."
+        warn "onesixtyone not found or no wordlist — trying snmpwalk with 'public' directly."
     fi
 
     # Full SNMP walk with public community

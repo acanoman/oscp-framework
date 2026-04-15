@@ -25,13 +25,17 @@ manual commands to run — nothing is executed automatically.
 
 **What ARGUS does:**
 
-- Runs 11 enumeration modules in strict tier order (Tier 1 → 2 → 3)
+- Runs 12 enumeration modules in strict tier order (Tier 1 → 2 → 3)
 - Streams every tool's stdout to the terminal in real time with colour-coded prefixes
 - Generates a `notes.md` report after every module (always up to date)
 - Synthesizes all findings into a **🎯 Prioritized Attack Path** panel at end of run
-- Detects SMBv1, NTLM relay risk, AS-REP Roastable users, Kerberoastable SPNs, SSH CVEs, Apache versions, high-value web paths, downloadable files, LDAP description-field passwords, and more
+- Detects SMBv1, NTLM relay risk, AS-REP Roastable users, Kerberoastable SPNs, SSH CVEs, Apache versions, high-value web paths, downloadable files, LDAP description-field passwords, vhosts, DNS AXFR results, and more
 - Emits every attack-adjacent command as a `[MANUAL]` hint — copy-paste ready, never auto-executed
+- Writes `_manual_commands.txt` — a standalone file with every manual hint, one per line, ready to paste
+- Writes `_commands.log` — a full timestamped audit trail of every command executed
+- Applies per-module hard timeouts to prevent any single scan from blocking the exam clock
 - Persists state in `session.json` so `--resume` skips completed modules
+- **`--quick` mode**: caps every module at 120 s — ideal for a fast first pass across all exam machines
 
 **What ARGUS does NOT do:**
 
@@ -54,6 +58,8 @@ manual commands to run — nothing is executed automatically.
 | Attack commands = hints only | AS-REP Roast, Kerberoast, NTLM Relay, spray commands appear as `[MANUAL]` hints |
 | No auto-download from shares | SMB share download commands shown as manual hints only |
 | Full transparency | `--dry-run` prints every command without executing any |
+| Audit trail | `_commands.log` records every executed command with timestamp |
+| Exam safety | Per-module timeouts and `--quick` mode prevent scans from blocking the clock |
 
 ---
 
@@ -183,6 +189,16 @@ python main.py --target 10.10.10.5 --modules smb ldap web
 
 Skips auto-detection and runs exactly the listed modules in tier order.
 
+### Quick mode — OSCP exam first pass
+
+```bash
+python main.py --target 10.10.10.5 --quick --lhost 10.10.14.5
+```
+
+`--quick` caps every module at **120 seconds** and then moves on. Use this
+for a fast first pass over all exam machines to collect low-hanging fruit,
+then run a second full pass (without `--quick`) on the most promising targets.
+
 ### Custom output directory
 
 ```bash
@@ -198,6 +214,7 @@ python main.py --target 10.10.10.5 --output-dir /root/oscp/exam --lhost 10.10.14
 | `--lhost` | | `""` | Your attacker/VPN IP. Pre-fills all `<LHOST>` placeholders in `notes.md` |
 | `--resume` | | `false` | Resume from `session.json`. Skips Nmap and completed modules |
 | `--modules` | `-m` | *(auto)* | Force specific modules. Choices: `smb ftp ldap dns snmp nfs services network databases remote mail web` |
+| `--quick` | `-q` | `false` | Quick mode — abort each module after 120 s and move on. Ideal for OSCP first-pass recon |
 | `--dry-run` | | `false` | Print commands without executing any |
 | `--output-dir` | | `output/targets` | Base directory for scan output |
 | `--verbose` | `-v` | `false` | Show DEBUG-level log messages in the terminal |
@@ -284,7 +301,7 @@ Nmap's service detection output and well-known port fallbacks.
 | **SMB** | 1 | `smb_enum.sh` | Nmap SMB scripts (vuln, shares, os-discovery, smb2-security-mode); enum4linux-ng; smbmap null+guest; rpcclient user/group enum; nxc shares, users, password policy; RID cycling; SMBv1 detection; signing check; share name → username inference; manual smbclient hints per readable share; authenticated enum if credentials provided |
 | **FTP** | 1 | `ftp_enum.sh` | Banner grab; Nmap FTP NSE (ftp-anon, vsftpd-backdoor, bounce); anonymous login test; recursive directory listing; interesting file flagging |
 | **LDAP** | 1 | `ldap_enum.sh` | Nmap LDAP scripts; ldapsearch anonymous bind + full object dump; windapsearch user/privileged/groups/computers/AS-REP candidates; targeted search for password-in-description fields and Kerberoastable SPNs; Kerberos port 88 DC detection; kerbrute username enumeration via AS-REQ (no auth) |
-| **DNS** | 1 | `network_enum.sh` | Zone transfer attempt; reverse PTR lookups; subdomain brute-force |
+| **DNS** | 1 | `services_enum.sh` + direct `dig` | Nmap zone-transfer scripts; reverse PTR lookups; `dig AXFR` zone transfer attempt (results in `dns/axfr_dig.txt`); discovered hostnames parsed and added to `domains_found`; subdomain brute-force hints |
 | **SNMP** | 1 | `services_enum.sh` | onesixtyone community string sweep; snmpwalk full MIB walk; process list; network interfaces (pivot detection); user extraction |
 | **NFS** | 1 | `nfs_enum.sh` | rpcinfo portmapper dump; showmount export listing; Nmap NFS scripts; `no_root_squash` detection |
 | **SVC** | 1 | `services_enum.sh` | SSH audit (ssh-audit) + auth method enumeration; Telnet banner; MSRPC rpcdump; banner grabs for non-standard ports |
@@ -318,9 +335,11 @@ output/targets/10.10.10.5/
 │
 ├── session.json          ← Persistent state: ports, domain, users, findings
 ├── notes.md              ← Structured Markdown report, rebuilt after every module
-├── users.txt             ← All discovered usernames (auto-updated, used by spray hints)
+├── users.txt             ← All discovered usernames (auto-updated, deduplicated)
 ├── domain.txt            ← Discovered domain name, read by subsequent wrappers
 ├── session.jsonl         ← Structured JSON Lines audit log (DEBUG level)
+├── _commands.log         ← Timestamped list of every command executed (audit trail)
+├── _manual_commands.txt  ← All [MANUAL] hints collected in one file, copy-paste ready
 │
 ├── scans/
 │   ├── allports.txt          ← Fast TCP scan — all 65535 ports
@@ -364,6 +383,10 @@ output/targets/10.10.10.5/
 │   ├── ffuf_vhost<suffix>.txt ← Vhost fuzzing results
 │   └── wpscan<suffix>.txt     ← WordPress scan (if CMS detected)
 │
+├── dns/
+│   ├── dns_nmap.txt           ← Nmap DNS zone-transfer / recursion scripts
+│   └── axfr_dig.txt           ← Full dig AXFR zone transfer output
+│
 ├── ssh/                       ← ssh-audit output, auth methods
 ├── ftp/                       ← Banner, NSE scripts, directory tree
 ├── db/                        ← Per-engine NSE and CLI output
@@ -402,11 +425,18 @@ The report is rebuilt after every module. Sections appear in this order:
 
 ARGUS never executes attack-adjacent commands. When a module detects a
 condition that warrants further action, it records a `[MANUAL]` note. These
-appear in three places:
+appear in four places:
 
 1. **Terminal** — inline during the scan with a magenta `[MANUAL]` prefix
 2. **Attack path panel** — at end of run, ordered by priority
 3. **`notes.md`** — under "Manual Follow-Up Commands" as `- [ ]` checklist items
+4. **`_manual_commands.txt`** — a standalone plain-text file with every manual command,
+   one per block, grouped by context — the fastest way to copy-paste during an exam
+
+```bash
+# View all manual commands at end of run
+cat output/targets/10.10.10.5/_manual_commands.txt
+```
 
 ### Example — SMBv1 detected
 
@@ -445,6 +475,68 @@ appear in three places:
 [+] Potential download/loot file at: http://10.10.10.5/files/backup
 [MANUAL] Download and inspect: wget 'http://10.10.10.5/files/backup' -O /tmp/backup &&
          file /tmp/backup && strings /tmp/backup | grep -iE 'pass|user|admin|secret|key|token' | head -20
+```
+
+---
+
+## Module Timeouts
+
+Every module has a hard timeout. If a tool hangs (e.g. feroxbuster on a huge
+site), the process group is killed and the next module starts automatically.
+This prevents a single slow scan from blocking the entire exam clock.
+
+| Module | Default timeout |
+| ------ | --------------- |
+| `web` | 60 min |
+| `smb` | 10 min |
+| `ldap` | 10 min |
+| `snmp` | 5 min |
+| `services` | 5 min |
+| `databases` | 5 min |
+| `ftp` | 3 min |
+| `dns` | 3 min |
+| `nfs` | 3 min |
+| `remote` | 3 min |
+| `mail` | 3 min |
+| `network` | 2 min |
+
+`--quick` overrides all of these with a flat **120 s** limit per module.
+
+---
+
+## Audit Trail
+
+Two files are written to the target directory during every run:
+
+### `_commands.log`
+
+Every command executed is appended with a timestamp:
+
+```text
+[10:23:01] [CMD] bash wrappers/smb_enum.sh --target 10.10.10.5 --output-dir ...
+[10:24:34] [CMD] bash wrappers/ldap_enum.sh --target 10.10.10.5 ...
+[10:31:07] [CMD] bash wrappers/web_enum.sh --target 10.10.10.5 --port 80 ...
+```
+
+`--dry-run` commands are also logged with a `[DRY-RUN]` prefix — useful for
+reviewing scope before starting a live scan.
+
+### `_manual_commands.txt`
+
+Every `[MANUAL]` hint is appended as an executable block:
+
+```text
+# Check password policy before any spray (avoid lockouts)
+crackmapexec smb 10.10.10.5 --pass-pol
+
+# List SMB share: backups
+smbclient '//10.10.10.5/backups' -N -c 'ls'
+
+# AS-REP Roasting — extract hashes from accounts without pre-auth
+impacket-GetNPUsers CORP/ -dc-ip 10.10.10.5 -no-pass -usersfile users.txt ...
+
+# VHost discovered — add to /etc/hosts and re-enumerate: dev.corp.local
+echo '10.10.10.5  dev.corp.local' | sudo tee -a /etc/hosts
 ```
 
 ---
