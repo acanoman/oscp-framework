@@ -69,8 +69,8 @@ info "[1/5] Banner grab"
 cmd "nc -nv -w 5 $TARGET $FTP_PORT"
 BANNER=$(timeout 5 bash -c "echo '' | nc -nv -w 5 $TARGET $FTP_PORT" 2>&1 || true)
 echo "$BANNER" > "${FTP_DIR}/ftp_banner.txt"
-BANNER_LINE=$(echo "$BANNER" | grep -vE '^$|^\(UNKNOWN\)|^Connection' | head -1 | cut -c1-100)
-[[ -n "$BANNER_LINE" ]] && ok "FTP banner: ${WHITE}${BANNER_LINE}${NC}"
+BANNER_LINE=$(echo "$BANNER" | grep -vE '^$|^\(UNKNOWN\)|^Connection' | head -1 | cut -c1-100 || true)
+[[ -n "$BANNER_LINE" ]] && ok "FTP banner: ${WHITE}${BANNER_LINE}${NC}" || true
 
 # ===========================================================================
 # Step 2 — Anonymous login probe

@@ -94,8 +94,8 @@ for SMTP_PORT in 25 465 587; do
     cmd "nc -nv -w 5 $TARGET $SMTP_PORT"
     SMTP_BANNER=$(timeout 5 bash -c "echo 'QUIT' | nc -nv -w 5 $TARGET $SMTP_PORT" 2>&1 || true)
     echo "$SMTP_BANNER" > "${SMTP_DIR}/smtp_banner_${SMTP_PORT}.txt"
-    BANNER_LINE=$(echo "$SMTP_BANNER" | grep -E '^220' | head -1 | cut -c1-100)
-    [[ -n "$BANNER_LINE" ]] && ok "SMTP ${SMTP_PORT} banner: ${WHITE}${BANNER_LINE}${NC}"
+    BANNER_LINE=$(echo "$SMTP_BANNER" | grep -E '^220' | head -1 | cut -c1-100 || true)
+    [[ -n "$BANNER_LINE" ]] && ok "SMTP ${SMTP_PORT} banner: ${WHITE}${BANNER_LINE}${NC}" || true
 
     # Nmap SMTP scripts
     cmd "nmap -p${SMTP_PORT} --script smtp-commands,smtp-enum-users,smtp-open-relay,smtp-vuln* -Pn $TARGET"
@@ -173,8 +173,8 @@ for POP3_PORT in 110 995; do
     cmd "nc -nv -w 5 $TARGET $POP3_PORT"
     POP3_BANNER=$(timeout 5 bash -c "echo 'QUIT' | nc -nv -w 5 $TARGET $POP3_PORT" 2>&1 || true)
     echo "$POP3_BANNER" > "${MAIL_DIR}/pop3_banner.txt"
-    BANNER_LINE=$(echo "$POP3_BANNER" | grep -E '^\+OK' | head -1 | cut -c1-100)
-    [[ -n "$BANNER_LINE" ]] && ok "POP3 ${POP3_PORT} banner: ${WHITE}${BANNER_LINE}${NC}"
+    BANNER_LINE=$(echo "$POP3_BANNER" | grep -E '^\+OK' | head -1 | cut -c1-100 || true)
+    [[ -n "$BANNER_LINE" ]] && ok "POP3 ${POP3_PORT} banner: ${WHITE}${BANNER_LINE}${NC}" || true
 
     cmd "nmap -p${POP3_PORT} --script pop3-capabilities,pop3-ntlm-info -Pn $TARGET"
     nmap -p"${POP3_PORT}" \
@@ -207,8 +207,8 @@ for IMAP_PORT in 143 993; do
     cmd "nc -nv -w 5 $TARGET $IMAP_PORT"
     IMAP_BANNER=$(timeout 5 bash -c "echo 'A1 LOGOUT' | nc -nv -w 5 $TARGET $IMAP_PORT" 2>&1 || true)
     echo "$IMAP_BANNER" > "${MAIL_DIR}/imap_banner.txt"
-    BANNER_LINE=$(echo "$IMAP_BANNER" | grep -E '^\* OK' | head -1 | cut -c1-100)
-    [[ -n "$BANNER_LINE" ]] && ok "IMAP ${IMAP_PORT} banner: ${WHITE}${BANNER_LINE}${NC}"
+    BANNER_LINE=$(echo "$IMAP_BANNER" | grep -E '^\* OK' | head -1 | cut -c1-100 || true)
+    [[ -n "$BANNER_LINE" ]] && ok "IMAP ${IMAP_PORT} banner: ${WHITE}${BANNER_LINE}${NC}" || true
 
     cmd "nmap -p${IMAP_PORT} --script imap-capabilities,imap-ntlm-info -Pn $TARGET"
     nmap -p"${IMAP_PORT}" \

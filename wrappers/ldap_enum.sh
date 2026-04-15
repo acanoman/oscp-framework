@@ -317,6 +317,34 @@ else
     info "Port 88 not open — target may not be a Domain Controller."
 fi
 
+# ---------------------------------------------------------------------------
+# BloodHound collection
+# ---------------------------------------------------------------------------
+if [[ -n "$DOMAIN" ]] || [[ -f "${OUTPUT_DIR}/ldap/base_dn.txt" ]]; then
+    EFFECTIVE_DOMAIN="$DOMAIN"
+    if [[ -z "$EFFECTIVE_DOMAIN" ]] && [[ -f "${OUTPUT_DIR}/ldap/base_dn.txt" ]]; then
+        EFFECTIVE_DOMAIN=$(grep -oP 'DC=\K[^,]+' \
+            "${OUTPUT_DIR}/ldap/base_dn.txt" 2>/dev/null \
+            | paste -sd '.' || true)
+    fi || true
+
+    [[ -n "$EFFECTIVE_DOMAIN" ]] && hint "BloodHound collection (requires credentials):
+    # Python-based (works from Linux):
+    bloodhound-python -u '<user>' -p '<pass>' \\
+        -d ${EFFECTIVE_DOMAIN} -dc ${TARGET} \\
+        -c All --zip -o ${OUTPUT_DIR}/ldap/bloodhound/
+    # Or with hash (pass-the-hash):
+    bloodhound-python -u '<user>' --hashes '<lm:nt>' \\
+        -d ${EFFECTIVE_DOMAIN} -dc ${TARGET} -c All --zip
+    # SharpHound (from Windows target):
+    .\\SharpHound.exe -c All --domain ${EFFECTIVE_DOMAIN} --zipfilename bh.zip
+    # Import: drag .zip into BloodHound GUI
+    # Key queries:
+    # - 'Shortest paths to Domain Admin'
+    # - 'Find all Domain Admins'
+    # - 'Find principals with DCSync rights'" || true
+fi
+
 # ===========================================================================
 # 7 — kerbrute — Kerberos username enumeration
 #

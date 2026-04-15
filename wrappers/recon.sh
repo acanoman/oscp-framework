@@ -79,7 +79,7 @@ info "Step 1/4 — TTL OS Detection"
 
 TTL_VAL=""
 if command -v ping &>/dev/null; then
-    TTL_VAL=$(ping -c 1 -W 2 "$TARGET" 2>/dev/null | grep -oP 'ttl=\K[0-9]+' | head -1)
+    TTL_VAL=$(ping -c 1 -W 2 "$TARGET" 2>/dev/null | grep -oP 'ttl=\K[0-9]+' | head -1 || true)
 fi
 
 if [[ -n "$TTL_VAL" ]]; then
@@ -216,6 +216,73 @@ if echo ",$PORTS," | grep -q ",53,"; then
     dig axfr <DOMAIN> @${TARGET}
     dnsrecon -d <DOMAIN> -a
     gobuster dns -d <DOMAIN> -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -t 20"
+fi
+
+# ===========================================================================
+# AUTO-SEARCHSPLOIT — version-based vulnerability lookup
+# Parses nmap XML output and runs searchsploit for each detected service.
+# Filters for RCE, PrivEsc, and Unauthenticated results.
+# ===========================================================================
+SEARCHSPLOIT_OUT="${OUTPUT_DIR}/scans/searchsploit_auto.txt"
+
+if command -v searchsploit &>/dev/null && [[ -f "${DEEP_BASE}.xml" ]]; then
+    info "Auto-searchsploit — looking up detected service versions..."
+    > "$SEARCHSPLOIT_OUT"
+
+    # Extract "product version" pairs from nmap XML
+    # Format: <service name="ssh" product="OpenSSH" version="5.9p1" .../>
+    SERVICES_FOUND=$(grep -oP 'product="[^"]*" version="[^"]*"' \
+        "${DEEP_BASE}.xml" 2>/dev/null \
+        | sed 's/product="//; s/" version="/ /; s/"//' \
+        | sort -u || true)
+
+    if [[ -z "$SERVICES_FOUND" ]]; then
+        # Fallback: parse .nmap text output
+        SERVICES_FOUND=$(grep -oP '\d+/tcp\s+open\s+\S+\s+\K.+' \
+            "${DEEP_BASE}.nmap" 2>/dev/null \
+            | sed 's/ \+/ /g' | sort -u || true)
+    fi
+
+    if [[ -n "$SERVICES_FOUND" ]]; then
+        while IFS= read -r svc_line; do
+            [[ -z "$svc_line" ]] && continue
+            # Use first two meaningful words as search term
+            SEARCH_TERM=$(echo "$svc_line" | awk '{print $1, $2}' | sed 's/[()]//g')
+            [[ -z "$SEARCH_TERM" || "$SEARCH_TERM" == " " ]] && continue
+
+            {
+                echo "========================================"
+                echo "  SERVICE: ${svc_line}"
+                echo "  QUERY  : searchsploit ${SEARCH_TERM}"
+                echo "========================================"
+            } >> "$SEARCHSPLOIT_OUT"
+
+            # Run searchsploit and filter for high-value results
+            SP_RESULT=$(searchsploit --colour "$SEARCH_TERM" 2>/dev/null || true)
+            if [[ -n "$SP_RESULT" ]]; then
+                # Flag RCE/PrivEsc/Unauth results inline
+                HIGH_VALUE=$(echo "$SP_RESULT" | \
+                    grep -iE 'remote code exec|rce|unauthenticated|privilege escalation|command injection|backdoor|buffer overflow|shell' \
+                    || true)
+                echo "$SP_RESULT" >> "$SEARCHSPLOIT_OUT"
+                if [[ -n "$HIGH_VALUE" ]]; then
+                    warn "searchsploit HIGH-VALUE hit for: ${WHITE}${SEARCH_TERM}${NC}"
+                    echo "$HIGH_VALUE" | head -5 | while IFS= read -r hit; do
+                        warn "  -> ${hit}"
+                    done
+                fi
+            else
+                echo "  (no results)" >> "$SEARCHSPLOIT_OUT"
+            fi
+            echo "" >> "$SEARCHSPLOIT_OUT"
+        done <<< "$SERVICES_FOUND"
+
+        ok "searchsploit auto-scan complete -> ${WHITE}${SEARCHSPLOIT_OUT}${NC}"
+    else
+        info "No service versions extracted for searchsploit."
+    fi
+elif ! command -v searchsploit &>/dev/null; then
+    skip "searchsploit"
 fi
 
 echo ""

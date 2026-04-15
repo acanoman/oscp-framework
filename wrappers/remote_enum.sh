@@ -171,49 +171,57 @@ if echo ",$PORTS," | grep -qP ',(5985|5986),'; then
 fi
 
 # ===========================================================================
-# VNC — port 5900
+# VNC — ports 5900, 5800, 5901, 5902
 # ===========================================================================
-if has_port 5900; then
-    info "[3/3] VNC (5900) — version fingerprint + authentication check"
-    VNC_OUT="${REMOTE_DIR}/vnc_nmap.txt"
+for VNC_PORT in 5900 5800 5901 5902; do
+    if has_port "$VNC_PORT"; then
+        VNC_DIR="${REMOTE_DIR}/vnc"
+        mkdir -p "$VNC_DIR"
+        info "[VNC] VNC enumeration on port ${VNC_PORT}"
 
-    cmd "nmap -p5900 --script vnc-info,realvnc-auth-bypass -Pn $TARGET"
-    nmap -p5900 \
-        --script 'vnc-info,realvnc-auth-bypass' \
-        -Pn "$TARGET" \
-        -oN "$VNC_OUT" 2>&1 | tee "$VNC_OUT" || {
-        warn "nmap (VNC) failed — output may be incomplete. Check ${VNC_OUT} for details."
-    } # IMP-7 applied
+        # Nmap VNC scripts
+        cmd "nmap -p${VNC_PORT} --script vnc-info,realvnc-auth-bypass -Pn ${TARGET}"
+        nmap -p"$VNC_PORT" \
+            --script vnc-info,realvnc-auth-bypass \
+            --script-timeout 30s -Pn "$TARGET" \
+            -oN "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" 2>&1 \
+            | tee "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" || true
 
-    # No-auth detection
-    if grep -qiE 'Authentication disabled|security type.*None|Security types supported.*None' \
-        "$VNC_OUT" 2>/dev/null; then
-        warn "VNC: NO AUTHENTICATION REQUIRED — direct access possible"
-        echo "[!] VNC unauthenticated access on ${TARGET}:5900" >> "$VNC_OUT"
+        # Parse security type
+        VNC_AUTH=$(grep -oP 'Security types: \K.+' \
+            "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" 2>/dev/null || true)
+        VNC_AUTH_TYPE=$(grep -oP 'Authentication\s*:\s*\K.+' \
+            "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" 2>/dev/null || true)
+
+        # None (type 1) = no password required
+        if grep -qi 'None\|security type: 1\|no authentication' \
+            "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" 2>/dev/null; then
+            warn "VNC port ${VNC_PORT} has NO AUTHENTICATION — direct access!"
+            hint "VNC no-auth access:
+    vncviewer ${TARGET}:${VNC_PORT}
+    xfreerdp /v:${TARGET} /port:${VNC_PORT}"
+        fi || true
+
+        # RealVNC auth bypass
+        if grep -qi 'VULNERABLE\|realvnc.*bypass\|CVE-2006' \
+            "${VNC_DIR}/vnc_nmap_${VNC_PORT}.txt" 2>/dev/null; then
+            warn "RealVNC Authentication Bypass (CVE-2006-2369) detected!"
+        fi || true
+
+        [[ -n "$VNC_AUTH" ]] && ok "VNC security types: ${WHITE}${VNC_AUTH}${NC}" || true
+
+        hint "VNC manual access:
+    vncviewer ${TARGET}:${VNC_PORT}
+    # With password:
+    vncviewer -passwd <passwd_file> ${TARGET}:${VNC_PORT}
+    # Brute force (authorized only):
+    hydra -P /usr/share/wordlists/rockyou.txt vnc://${TARGET}:${VNC_PORT}
+    # Metasploit scanner:
+    use auxiliary/scanner/vnc/vnc_login
+    set RHOSTS ${TARGET}; set RPORT ${VNC_PORT}; run"
+        echo ""
     fi
-
-    # RealVNC auth bypass vulnerability
-    if grep -qi "realvnc-auth-bypass.*VULNERABLE" "$VNC_OUT" 2>/dev/null; then
-        warn "VNC: RealVNC authentication bypass VULNERABLE — review ${VNC_OUT}"
-    fi
-
-    # Version fingerprint
-    VNC_VER=$(grep -oP 'Protocol version: \K.+' "$VNC_OUT" 2>/dev/null | head -1 || true)
-    [[ -n "$VNC_VER" ]] && ok "VNC protocol version: ${WHITE}${VNC_VER}${NC}"
-
-    # Security type reported
-    VNC_SEC=$(grep -oP 'Security types supported: \K.+' "$VNC_OUT" 2>/dev/null | head -1 || true)
-    [[ -n "$VNC_SEC" ]] && info "VNC security types: ${VNC_SEC}"
-
-    hint "VNC manual connection (requires authentication unless none is reported above):
-  vncviewer ${TARGET}:5900
-  vncviewer -passwd <PASSFILE> ${TARGET}:5900
-
-  # Password brute (manual — only if explicitly authorized):
-  hydra -P /usr/share/wordlists/rockyou.txt ${TARGET} vnc
-  medusa -h ${TARGET} -u '' -P /usr/share/wordlists/rockyou.txt -M vnc"
-    echo ""
-fi
+done
 
 ok "Remote access enumeration complete — output: ${REMOTE_DIR}/"
 echo ""

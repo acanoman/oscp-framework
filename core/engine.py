@@ -123,6 +123,7 @@ SERVICE_MODULE_MAP: Dict[str, str] = {
     "ssl/wsman":          "remote",
     "vnc":                "remote",
     "ssl/vnc":            "remote",
+    "rfb":                "remote",      # VNC uses RFB protocol
     # ── Kerberos (DC indicator — routed to ldap module for full AD enum) ─
     "kerberos-sec":       "ldap",        # port 88 most common Nmap label
     "kerberos":           "ldap",
@@ -144,6 +145,20 @@ SERVICE_MODULE_MAP: Dict[str, str] = {
     "msrpc":              "services",
     "epmap":              "services",   # Nmap alternate name for 135
     "microsoft-rpc":      "services",
+    # ── IRC ─────────────────────────────────────────────────────────────
+    "irc":                "services",
+    "ircs":               "services",   # IRC over TLS
+    # ── Java RMI ────────────────────────────────────────────────────────
+    "java-rmi":           "services",
+    "rmiregistry":        "services",
+    # ── CUPS / IPP ──────────────────────────────────────────────────────
+    "cups":               "services",
+    "ipp":                "services",   # CUPS uses IPP
+    # ── Memcached ───────────────────────────────────────────────────────
+    "memcache":           "databases",
+    "memcached":          "databases",
+    # ── rsync ───────────────────────────────────────────────────────────
+    "rsync":              "rsync",      # modules/rsync.py + wrappers/rsync_enum.sh
     # ── Generic services ────────────────────────────────────────────────
     "ssh":                "services",
     "telnet":             "services",
@@ -170,7 +185,9 @@ _PORT_FALLBACK_MAP: Dict[int, str] = {
     389:   "ldap",
     445:   "smb",
     464:   "ldap",       # Kerberos password change — also DC indicator
+    631:   "services",   # CUPS / IPP
     636:   "ldap",
+    873:   "rsync",      # rsync — modules/rsync.py + wrappers/rsync_enum.sh
     2049:  "nfs",
     3268:  "ldap",
     3269:  "ldap",
@@ -182,16 +199,22 @@ _PORT_FALLBACK_MAP: Dict[int, str] = {
     587:   "mail",
     993:   "mail",
     995:   "mail",
+    1099:  "services",   # Java RMI
     1433:  "databases",
     3306:  "databases",
     3389:  "remote",
     5432:  "databases",
+    5800:  "remote",     # VNC HTTP
     5900:  "remote",
     5984:  "databases",
     5985:  "remote",
     5986:  "remote",
     6379:  "databases",
+    6667:  "services",   # IRC
+    6697:  "services",   # IRC over TLS
+    9042:  "databases",  # Cassandra
     9200:  "databases",
+    11211: "databases",  # Memcached
     27017: "databases",
     # ── Tier 3 ──────────────────────────────────────────────────────────
     80:    "web",

