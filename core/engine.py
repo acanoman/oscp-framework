@@ -1112,7 +1112,14 @@ class Engine:
                             f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
                         )
                     elif stripped.startswith("[*]"):
-                        info(stripped[3:].strip())
+                        content = stripped[3:].strip()
+                        # Step header: [N/X] or [N.M/X] → visual separator rule
+                        if re.match(r'\[\d+\.?\d*/\d+\]', content):
+                            self.console.rule(
+                                f"[bold cyan] {content} [/bold cyan]", style="cyan"
+                            )
+                        else:
+                            info(content)
                     elif stripped.startswith("[SKIP]"):
                         from rich.markup import escape as _esc
                         self.console.print(
@@ -1120,7 +1127,12 @@ class Engine:
                         )
                     else:
                         # Plain tool output (nmap, smbclient, etc.) — dim, no prefix
-                        pipe(line)
+                        # Highlight nmap open port lines in green/bold
+                        if re.match(r'\d+/(tcp|udp)\s+open\s+', stripped):
+                            from rich.markup import escape as _esc
+                            self.console.print(f"  [bold green]{_esc(stripped)}[/bold green]")
+                        else:
+                            pipe(line)
                     self.log.debug("exec: %s", line)
                 proc.wait()
                 last_rc = proc.returncode if proc.returncode is not None else 0

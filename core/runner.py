@@ -125,7 +125,12 @@ def run_wrapper(
         elif stripped.startswith("[-]"):
             console.print(f"  [red][-][/red] [dim]{_esc(stripped[3:].strip())}[/dim]")
         elif stripped.startswith("[*]"):
-            info(stripped[3:].strip())
+            content = stripped[3:].strip()
+            # Step header: [N/X] or [N.M/X] — render as visual separator rule
+            if re.match(r'\[\d+\.?\d*/\d+\]', content):
+                console.rule(f"[bold cyan] {_esc(content)} [/bold cyan]", style="cyan")
+            else:
+                info(content)
         elif stripped.startswith("[CMD]"):
             console.print(
                 f"  [dim yellow][CMD][/dim yellow] "
@@ -141,7 +146,11 @@ def run_wrapper(
         elif stripped.startswith("[✓]"):
             done(stripped[3:].strip())
         else:
-            pipe(clean)   # plain tool output — dim, no prefix
+            # Highlight nmap open port lines in green/bold — easy to spot in scroll
+            if re.match(r'\d+/(tcp|udp)\s+open\s+', clean.strip()):
+                console.print(f"  [bold green]{_esc(clean.strip())}[/bold green]")
+            else:
+                pipe(clean)   # plain tool output — dim, no prefix
         log.debug("wrapper: %s", clean)
 
     try:
