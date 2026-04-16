@@ -172,8 +172,10 @@ if has_port 22; then
     if command -v ssh-audit &>/dev/null; then
         SSH_AUDIT_OUT="${OUTPUT_DIR}/ssh/ssh_audit.txt"
         cmd "ssh-audit --skip-rate-test $TARGET"
-        # Save full output to file for later reference
-        ssh-audit --skip-rate-test "$TARGET" > "$SSH_AUDIT_OUT" 2>&1 || true
+        # Save full output to file — strip ANSI colour codes so grep/display works cleanly
+        ssh-audit --skip-rate-test "$TARGET" 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            > "$SSH_AUDIT_OUT" || true
 
         # Print only the signal lines to the terminal — skip algorithm noise
         # (kex/enc/mac/key info lines and rec/nfo advisory lines).

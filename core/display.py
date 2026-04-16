@@ -5,11 +5,12 @@ All output goes through Rich so colors are portable and consistent.
 No ANSI escape codes are hardcoded here.
 """
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 
@@ -65,7 +66,7 @@ def module_done(name: str) -> None:
 
 def findings_panel(module_name: str, findings: List[Tuple[str, str]]) -> None:
     """
-    Print a Rich panel summarising key findings from a module.
+    Print a Rich table panel summarising key findings from a module.
 
     findings: list of (severity, message) tuples where severity is one of:
         "critical"  → red    ⚠
@@ -76,26 +77,79 @@ def findings_panel(module_name: str, findings: List[Tuple[str, str]]) -> None:
     if not findings:
         return
 
-    _SEVERITY_FMT = {
-        "critical": ("[bold red]  ⚠  [/bold red]",        "red"),
-        "high":     ("[bold yellow]  ⚡  [/bold yellow]",  "yellow"),
-        "access":   ("[bold cyan]  ✅  [/bold cyan]",      "cyan"),
-        "info":     ("[green]  •  [/green]",               "green"),
+    _SEV = {
+        "critical": ("⚠  CRIT",  "bold red"),
+        "high":     ("⚡ HIGH",   "bold yellow"),
+        "access":   ("✅ ACCESS", "bold cyan"),
+        "info":     ("•  INFO",   "green"),
     }
 
-    lines = []
+    table = Table(
+        show_header=True,
+        header_style="bold bright_white",
+        border_style="bright_blue",
+        show_edge=False,
+        padding=(0, 1),
+        expand=True,
+    )
+    table.add_column("SEV", width=10, no_wrap=True)
+    table.add_column("FINDING")
+
     for sev, msg in findings:
-        prefix, color = _SEVERITY_FMT.get(sev, _SEVERITY_FMT["info"])
-        lines.append(f"{prefix}[{color}]{escape(msg)}[/{color}]")
+        label, color = _SEV.get(sev, _SEV["info"])
+        table.add_row(
+            f"[{color}]{label}[/{color}]",
+            f"[{color}]{escape(msg)}[/{color}]",
+        )
 
     console.print(
         Panel(
-            "\n".join(lines),
+            table,
             title=f"[bold white] {module_name.upper()} FINDINGS [/bold white]",
             border_style="bright_blue",
-            padding=(0, 2),
+            padding=(0, 1),
         )
     )
+
+
+def recon_port_table(ip: str, os_guess: str, port_details: Dict[int, dict]) -> None:
+    """
+    Print a Rich table with discovered ports/services after initial recon.
+
+    port_details: dict mapping port (int) → {"service": str, "version": str}
+    """
+    if not port_details:
+        return
+
+    table = Table(
+        show_header=True,
+        header_style="bold bright_white",
+        border_style="cyan",
+        show_edge=False,
+        padding=(0, 1),
+        expand=False,
+    )
+    table.add_column("PORT",    style="bold cyan",  width=7,  no_wrap=True)
+    table.add_column("SERVICE", style="bold white", width=12, no_wrap=True)
+    table.add_column("VERSION", style="dim white")
+
+    for port in sorted(port_details.keys()):
+        d   = port_details[port]
+        svc = d.get("service", "")
+        ver = d.get("version", "")
+        table.add_row(str(port), svc, ver)
+
+    console.print()
+    console.print(
+        Panel(
+            table,
+            title=f"[bold cyan] RECON — {ip} [/bold cyan]",
+            subtitle=f"[dim] OS guess: {os_guess} [/dim]" if os_guess else None,
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    console.print()
 
 
 def banner() -> None:

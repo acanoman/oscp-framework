@@ -31,7 +31,7 @@ from rich.panel import Panel
 from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
-from core.display import module_start, module_done, info, pipe, success, warn, error, findings_panel
+from core.display import module_start, module_done, info, pipe, success, warn, error, findings_panel, recon_port_table
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +703,14 @@ class Engine:
             self.session.add_note(
                 f"Nmap found ports: {sorted(self.info.open_ports)}"
             )
+
+            # Print a clean port/service summary table after recon
+            if self.info.port_details:
+                recon_port_table(
+                    self.target,
+                    self.info.os_guess,
+                    self.info.port_details,
+                )
 
             # Auto-detect Domain Controller from port fingerprint:
             # Kerberos (88) + any LDAP variant is a near-certain DC indicator.

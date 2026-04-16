@@ -590,8 +590,13 @@ else
     rm -f "${WEB_DIR}/.sniper_dirs${SUFFIX}.tmp"
 
     if [[ -s "$CGI_SNIPER_OUT" ]]; then
-        SCRIPT_COUNT=$(grep -cP 'https?://' "$CGI_SNIPER_OUT" 2>/dev/null || echo 0)
-        ok "${RED}⚠  CGI SNIPER: ${SCRIPT_COUNT} script(s) found → ${CGI_SNIPER_OUT}${NC}"
+        # Count only actual executable scripts (.cgi .sh .pl) — not HTML/images
+        SCRIPT_COUNT=$(grep -ciP '\.(cgi|sh|pl)(\?|$| )' "$CGI_SNIPER_OUT" 2>/dev/null || echo 0)
+        if [[ "$SCRIPT_COUNT" -gt 0 ]]; then
+            ok "${RED}⚠  CGI SNIPER: ${SCRIPT_COUNT} executable script(s) found → ${CGI_SNIPER_OUT}${NC}"
+        else
+            info "CGI sniper: no .cgi/.sh/.pl scripts found (non-script responses filtered)."
+        fi
     else
         info "CGI sniper: no executable scripts found in any discovered directory."
     fi

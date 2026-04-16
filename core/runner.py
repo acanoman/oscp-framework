@@ -12,6 +12,7 @@ inside the target directory so the operator has a complete audit trail.
 """
 
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -21,7 +22,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from core.display import info, success, warn, error
+from core.display import info, success, warn, error, pipe, done, console
+
+# Compiled once — strips all ANSI/VT100 color escape sequences
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mGKHFJA-Z]')
 
 
 def _append_commands_log(session, display: str, dry_run: bool) -> None:
@@ -74,7 +78,11 @@ def run_wrapper(
     display = " ".join(str(c) for c in cmd)
     prefix  = "[DRY-RUN]" if dry_run else "[CMD]"
     log.info("%s %s", prefix, display)
-    info(f"> {display}")
+    # Show wrapper invocation in the same [CMD] style as bash sub-commands
+    from rich.markup import escape as _esc
+    console.print(
+        f"  [dim yellow][CMD][/dim yellow] [dim]{_esc(display)}[/dim]"
+    )
 
     # Always write to _commands.log — even dry-run previews are useful
     _append_commands_log(session, display, dry_run)
@@ -105,15 +113,36 @@ def run_wrapper(
     _last_int_time: float = 0.0   # tracks first Ctrl+C time for this invocation
 
     def _display_line(line: str) -> None:
-        if line.startswith("[+]"):
-            success(line[3:].strip())
-        elif line.startswith("[!]"):
-            warn(line[3:].strip())
-        elif line.startswith("[-]"):
-            info(line[3:].strip())
+        from rich.markup import escape as _esc
+        # Strip ANSI escape codes (e.g. ssh-audit colour output)
+        clean    = _ANSI_RE.sub('', line)
+        stripped = clean.lstrip()
+
+        if stripped.startswith("[+]"):
+            success(stripped[3:].strip())
+        elif stripped.startswith("[!]"):
+            warn(stripped[3:].strip())
+        elif stripped.startswith("[-]"):
+            console.print(f"  [red][-][/red] [dim]{_esc(stripped[3:].strip())}[/dim]")
+        elif stripped.startswith("[*]"):
+            info(stripped[3:].strip())
+        elif stripped.startswith("[CMD]"):
+            console.print(
+                f"  [dim yellow][CMD][/dim yellow] "
+                f"[dim]{_esc(stripped[5:].strip())}[/dim]"
+            )
+        elif stripped.startswith("[MANUAL]"):
+            console.print(
+                f"  [magenta][MANUAL][/magenta] "
+                f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
+            )
+        elif stripped.startswith("[SKIP]"):
+            console.print(f"  [dim][SKIP][/dim] {_esc(stripped[6:].strip())}")
+        elif stripped.startswith("[✓]"):
+            done(stripped[3:].strip())
         else:
-            info(line)
-        log.debug("wrapper: %s", line)
+            pipe(clean)   # plain tool output — dim, no prefix
+        log.debug("wrapper: %s", clean)
 
     try:
         proc = subprocess.Popen(
