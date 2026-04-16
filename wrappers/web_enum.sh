@@ -866,6 +866,227 @@ hint "Burp Suite — manual proxy testing:
     - Test file upload endpoints for dangerous extensions"
 
 # ===========================================================================
+# CMS Fingerprint — deep CVE-oriented fingerprinting
+#
+# Aggregates every scan artifact gathered so far (whatweb / gobuster /
+# feroxbuster / nikto / headers / robots) and runs signature matching
+# against 16 known applications.  Emits CVEs + loot paths + exploit
+# hints for confirmed hits.  Also promotes sensitive 200-OK paths to
+# CRITICAL via a fallback regex pass.
+#
+# Output: ${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt
+# ===========================================================================
+cms_fingerprint() {
+    local cms_out="${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt"
+    : > "$cms_out"
+    info "[CMS-FP] Deep CMS fingerprinting (CVE matching + sensitive-path fallback)"
+
+    # ---- Aggregate every available scan artifact into a searchable blob ----
+    local blob="" src
+    for src in "$WHATWEB_OUT" \
+               "$GB_QUICK_OUT" "${GB_QUICK_OUT}.log" \
+               "$FEROX_OUT"    "${FEROX_OUT}.log"    \
+               "$NIKTO_OUT"    "$QUICK_OUT"          \
+               "${WEB_DIR}/headers${SUFFIX}.txt"     \
+               "${WEB_DIR}/robots${SUFFIX}.txt"; do
+        if [[ -s "$src" ]]; then
+            blob+=$'\n'"$(cat "$src" 2>/dev/null || true)"
+        fi
+    done
+
+    if [[ -z "${blob//[[:space:]]/}" ]]; then
+        info "CMS-FP: no scan data available to analyze — skipping."
+        echo "# No scan data" > "$cms_out"
+        return 0
+    fi
+
+    {
+        echo "# CMS Fingerprint — ${BASE_URL}"
+        echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+    } >> "$cms_out"
+
+    # ---- Helper: emit a confirmed CMS hit (written AND logged) ----
+    # Prefixes stdout with "CRITICAL:" so engine.py flags it in findings_panel.
+    _emit_cms() {
+        # $1 = name   $2 = CVEs   $3 = loot paths   $4 = exploit hint
+        warn "${RED}CRITICAL: CMS detected: $1 — CVEs: $2${NC}"
+        ok "CMS exploit guidance written → ${cms_out}"
+        {
+            echo "======================================================================"
+            echo "  CMS           : $1"
+            echo "  Known CVEs    : $2"
+            echo "  Loot paths    : $3"
+            echo "  Exploit hint  : $4"
+            echo "======================================================================"
+            echo ""
+        } >> "$cms_out"
+    }
+
+    # ── Signature matching (16 applications) ────────────────────────────
+    if echo "$blob" | grep -qiE 'cutephp\.png|/cdata/users\.txt|/cdata/users/lines|CuteNews|/core/ckeditor'; then
+        _emit_cms "CuteNews" \
+            "CVE-2019-11447, CVE-2020-13432" \
+            "/cdata/users/lines (bcrypt hashes), /cdata/users.txt, /core/ckeditor/" \
+            "searchsploit cutenews | msfconsole -q -x 'use exploit/multi/http/cutenews_avatar_shell_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; run'"
+    fi
+
+    if echo "$blob" | grep -qiE 'typo3_src|typo3conf|typo3temp|/typo3/index\.php|TYPO3'; then
+        _emit_cms "TYPO3" \
+            "CVE-2019-12747, CVE-2020-11060, CVE-2022-22818" \
+            "/typo3/install/, /typo3conf/LocalConfiguration.php, /typo3/index.php" \
+            "searchsploit typo3 | curl -sk ${BASE_URL}/typo3/install/"
+    fi
+
+    if echo "$blob" | grep -qiE 'CMSPages|CMSAPIProxy|Kentico|CMSInstall'; then
+        _emit_cms "Kentico" \
+            "CVE-2020-11483 (auth bypass), CVE-2021-46442" \
+            "/CMSPages/Staging/SyncServer.asmx, /CMSAPIProxy/, /CMSInstall/install.aspx" \
+            "searchsploit kentico | curl -sk ${BASE_URL}/CMSPages/Staging/SyncServer.asmx"
+    fi
+
+    if echo "$blob" | grep -qiE '/administrator/|com_content|option=com_|joomla|Joomla!'; then
+        _emit_cms "Joomla" \
+            "CVE-2023-23752 (unauth info disclosure), CVE-2019-10945, CVE-2017-8917" \
+            "/administrator/, /api/index.php/v1/config/application?public=true" \
+            "joomscan -u ${BASE_URL} | curl -sk '${BASE_URL}/api/index.php/v1/config/application?public=true'"
+    fi
+
+    if echo "$blob" | grep -qiE 'drupal|/sites/default/|/core/misc/drupal|Drupal'; then
+        _emit_cms "Drupal" \
+            "CVE-2018-7600 (Drupalgeddon2), CVE-2019-6340, CVE-2018-7602" \
+            "/CHANGELOG.txt, /core/CHANGELOG.txt, /user/login, /?q=user/login" \
+            "droopescan scan drupal -u ${BASE_URL} | searchsploit drupalgeddon"
+    fi
+
+    if echo "$blob" | grep -qiE 'wp-content|wp-includes|wp-json|wordpress|/wp-login\.php'; then
+        _emit_cms "WordPress" \
+            "Varies per plugin/theme — wpscan enumerates vulnerable components" \
+            "/wp-login.php, /wp-admin/, /wp-json/wp/v2/users, /xmlrpc.php" \
+            "wpscan --url ${BASE_URL} --enumerate u,vp,vt --plugins-detection aggressive"
+    fi
+
+    if echo "$blob" | grep -qiE '/skin/frontend/|mage/cookies\.js|/app/Mage\.php|magento|Magento'; then
+        _emit_cms "Magento" \
+            "CVE-2022-24086 (unauth RCE), CVE-2019-7139" \
+            "/app/etc/env.php (credentials), /downloader/, /admin/" \
+            "searchsploit magento | curl -sk ${BASE_URL}/magento_version"
+    fi
+
+    if echo "$blob" | grep -qiE 'index\.php\?route=|opencart|OpenCart|/catalog/view/'; then
+        _emit_cms "OpenCart" \
+            "CVE-2020-22853 (SQLi), CVE-2019-16669" \
+            "/admin/, /admin/config.php, /install/" \
+            "searchsploit opencart"
+    fi
+
+    if echo "$blob" | grep -qiE 'prestashop|PrestaShop|/img/l/|/modules/ps_'; then
+        _emit_cms "PrestaShop" \
+            "CVE-2023-30196, CVE-2018-13784" \
+            "/admin-dev/, /install/, /modules/" \
+            "searchsploit prestashop"
+    fi
+
+    if echo "$blob" | grep -qiE 'MediaWiki|/wiki/|api\.php\?action=|mw-config'; then
+        _emit_cms "MediaWiki" \
+            "CVE-2019-11358, CVE-2020-15005" \
+            "/mw-config/, /api.php?action=query, /Special:Version" \
+            "searchsploit mediawiki | curl -sk '${BASE_URL}/api.php?action=query&meta=siteinfo&format=json'"
+    fi
+
+    if echo "$blob" | grep -qiE 'phpMyAdmin|/phpmyadmin|/pma/|/phpMyAdmin/|pma_'; then
+        _emit_cms "phpMyAdmin" \
+            "CVE-2018-12613 (LFI), CVE-2020-26934, CVE-2019-12922" \
+            "/phpmyadmin/, /phpmyadmin/index.php?target=db_sql.php%253f" \
+            "searchsploit phpmyadmin | hydra -l root -P /usr/share/wordlists/rockyou.txt ${TARGET} http-post-form '/phpmyadmin/index.php:pma_username=^USER^&pma_password=^PASS^:Cannot log in'"
+    fi
+
+    if echo "$blob" | grep -qiE 'Gitea|powered by Gitea|/gitea/'; then
+        _emit_cms "Gitea" \
+            "CVE-2020-14144, CVE-2022-30781, CVE-2021-45325" \
+            "/user/sign_up, /api/v1/users/search, /explore/repos" \
+            "searchsploit gitea | curl -sk ${BASE_URL}/api/v1/users/search"
+    fi
+
+    if echo "$blob" | grep -qiE 'GitLab|gitlab_session|/users/sign_in|/-/graphql'; then
+        _emit_cms "GitLab" \
+            "CVE-2021-22205 (unauth RCE), CVE-2023-7028 (password-reset hijack)" \
+            "/users/sign_in, /explore/projects, /-/graphql, /help" \
+            "searchsploit gitlab | curl -sk ${BASE_URL}/help"
+    fi
+
+    if echo "$blob" | grep -qiE 'Jenkins|X-Jenkins|/login\?from=|/script'; then
+        _emit_cms "Jenkins" \
+            "CVE-2018-1000861 (unauth RCE), CVE-2024-23897 (arbitrary file read)" \
+            "/script (Groovy console), /manage, /asynchPeople/, /userContent/" \
+            "searchsploit jenkins | # default creds — test admin:admin at /login"
+    fi
+
+    if echo "$blob" | grep -qiE 'Apache Tomcat|Catalina|Coyote|/manager/html|/manager/status'; then
+        _emit_cms "Apache Tomcat" \
+            "CVE-2020-1938 (Ghostcat), CVE-2017-12617, CVE-2020-9484" \
+            "/manager/html, /host-manager/html, /manager/text/list" \
+            "msfconsole -q -x 'use exploit/multi/http/tomcat_mgr_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; set HttpUsername tomcat; set HttpPassword tomcat' | default creds: tomcat:tomcat, admin:admin, tomcat:s3cret"
+    fi
+
+    if echo "$blob" | grep -qiE 'Webmin|/unauthenticated/|webmin_'; then
+        _emit_cms "Webmin" \
+            "CVE-2019-15107 (unauth RCE, Webmin ≤ 1.920)" \
+            "/password_change.cgi, /session_login.cgi, /unauthenticated/" \
+            "searchsploit webmin 1.920 | msfconsole -q -x 'use exploit/unix/webapp/webmin_backdoor; set RHOSTS ${TARGET}; set RPORT ${PORT}'"
+    fi
+
+    # ── Critical path fallback — any 200-OK path matching sensitive regex ──
+    local crit_regex='(users\.txt|users\.db|config\.php|\.env|backup|\.bak|\.git/|\.svn/|phpinfo|server-status|credentials|id_rsa|\.htpasswd|web\.config)'
+    local crit_hits_file="${cms_out}.tmp"
+    {
+        if [[ -s "${GB_QUICK_OUT}.log" ]]; then
+            grep -E '\(Status: 200\)' "${GB_QUICK_OUT}.log" 2>/dev/null \
+                | awk '{print $1}' || true
+        fi
+        if [[ -s "$GB_QUICK_OUT" ]]; then
+            grep -E '\(Status: 200\)' "$GB_QUICK_OUT" 2>/dev/null \
+                | awk '{print $1}' || true
+        fi
+        if [[ -s "$FEROX_OUT" ]]; then
+            grep -E '^200[[:space:]]' "$FEROX_OUT" 2>/dev/null \
+                | awk '{print $NF}' || true
+        fi
+        if [[ -s "${FEROX_OUT}.log" ]]; then
+            grep -E '^200[[:space:]]' "${FEROX_OUT}.log" 2>/dev/null \
+                | awk '{print $NF}' || true
+        fi
+    } | grep -iE "$crit_regex" | sort -u > "$crit_hits_file" 2>/dev/null || true
+
+    if [[ -s "$crit_hits_file" ]]; then
+        {
+            echo ""
+            echo "# === CRITICAL 200-OK PATHS (sensitive regex match) ==="
+        } >> "$cms_out"
+        local hit
+        while IFS= read -r hit; do
+            [[ -z "$hit" ]] && continue
+            warn "${RED}CRITICAL: sensitive 200-OK path — ${hit}${NC}"
+            echo "$hit" >> "$cms_out"
+        done < "$crit_hits_file"
+    fi
+    rm -f "$crit_hits_file" 2>/dev/null || true
+
+    local cms_lines
+    cms_lines=$(wc -l < "$cms_out" 2>/dev/null || echo 0)
+    if [[ "$cms_lines" -gt 3 ]]; then
+        ok "CMS fingerprint done → ${WHITE}${cms_out}${NC} (${cms_lines} lines)"
+    else
+        info "CMS-FP: no known application fingerprinted, no sensitive paths flagged."
+    fi
+}
+
+# Integrate into the main flow — runs AFTER all scan steps so every output
+# artifact (whatweb, gobuster, feroxbuster, nikto) is available to analyze.
+cms_fingerprint
+echo ""
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
@@ -881,6 +1102,7 @@ echo -e "  ${BOLD}============================================================${
 [[ -s "$SSLSCAN_OUT" ]]         && echo "  [+] SSLscan    : ${SSLSCAN_OUT}"   || true
 [[ -s "$NIKTO_OUT" ]]           && echo "  [+] Nikto      : ${NIKTO_OUT}"     || true
 [[ -n "$CMS_DETECTED" ]]        && echo "  [!] CMS        : ${CMS_DETECTED}"  || true
+[[ -s "${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt" ]] && echo "  [!] CMS-FP     : ${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt" || true
 echo ""
 ok "Web enumeration complete."
 echo ""
