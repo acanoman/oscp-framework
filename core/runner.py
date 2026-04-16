@@ -27,6 +27,13 @@ from core.display import info, success, warn, error, pipe, done, console
 # Compiled once — strips all ANSI/VT100 color escape sequences
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mGKHFJA-Z]')
 
+# Feroxbuster output format:
+#   STATUS METHOD Nl Nw Nc http://host/path [=> redirect]
+# We strip the noisy l/w/c columns and suppress 301→trailing-slash redirects.
+_FEROX_LINE_RE = re.compile(
+    r'^(\d{3})\s+\w+\s+\d+l\s+\d+w\s+\d+c\s+(https?://\S+?)(?:\s+=>\s+(\S+))?$'
+)
+
 
 def _append_commands_log(session, display: str, dry_run: bool) -> None:
     """Append one command line to <target_dir>/_commands.log."""
@@ -137,20 +144,33 @@ def run_wrapper(
                 f"[dim]{_esc(stripped[5:].strip())}[/dim]"
             )
         elif stripped.startswith("[MANUAL]"):
-            console.print(
-                f"  [magenta][MANUAL][/magenta] "
-                f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
-            )
+            pass  # suppress inline — operator reads findings panel / log file
         elif stripped.startswith("[SKIP]"):
             console.print(f"  [dim][SKIP][/dim] {_esc(stripped[6:].strip())}")
         elif stripped.startswith("[✓]"):
             done(stripped[3:].strip())
         else:
-            # Highlight nmap open port lines in green/bold — easy to spot in scroll
-            if re.match(r'\d+/(tcp|udp)\s+open\s+', clean.strip()):
-                console.print(f"  [bold green]{_esc(clean.strip())}[/bold green]")
+            plain = clean.strip()
+            # Highlight nmap open port lines in green/bold
+            if re.match(r'\d+/(tcp|udp)\s+open\s+', plain):
+                console.print(f"  [bold green]{_esc(plain)}[/bold green]")
             else:
-                pipe(clean)   # plain tool output — dim, no prefix
+                # Reformat feroxbuster result lines — strip noisy l/w/c columns
+                fm = _FEROX_LINE_RE.match(plain)
+                if fm:
+                    status, url, redirect = fm.group(1), fm.group(2), fm.group(3)
+                    # Suppress 301/302 redirects to the same path + trailing slash
+                    if redirect and status in ("301", "302"):
+                        url_norm    = url.rstrip("/")
+                        redir_norm  = redirect.rstrip("/")
+                        if url_norm == redir_norm:
+                            return   # trailing-slash self-redirect — silent
+                    parts = f"{status} {url}"
+                    if redirect:
+                        parts += f" => {redirect}"
+                    pipe(parts)
+                else:
+                    pipe(plain)   # plain tool output — dim, no prefix
         log.debug("wrapper: %s", clean)
 
     try:

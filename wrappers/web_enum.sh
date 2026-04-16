@@ -186,6 +186,40 @@ QF_CODE=$(echo "$RAW_HEADERS"    | grep -oP 'HTTP/[\d.]+ \K\d{3}' | tail -1 || t
 [[ -n "$QF_POWERED" ]] && ok  "X-Powered-By  : ${WHITE}${QF_POWERED}${NC}" || true
 [[ -n "$QF_CTYPE"  ]] && info "Content-Type  : ${QF_CTYPE}"                || true
 
+# ---------------------------------------------------------------------------
+# Soft-404 and hard-404 detection
+#
+# Hard-404: root AND random paths all return 404 → server broken/filtered.
+#           Directory brute-force pointless — skip gobuster and feroxbuster.
+#
+# Soft-404: random non-existent paths return 200 with identical body size.
+#           Server uses a catch-all that returns 200 for everything.
+#           Pass --exclude-length / --filter-size so tools skip that template.
+# ---------------------------------------------------------------------------
+WEB_404_ONLY=false
+WEB_SOFT_404=false
+WEB_SOFT_404_SIZE=""
+
+_RAND1="$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 12 2>/dev/null || echo 'rndtest1')"
+_RAND2="$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 12 2>/dev/null || echo 'rndtest2')"
+_R1=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}:%{size_download}' \
+    "${BASE_URL}/${_RAND1}" 2>/dev/null || echo "000:0")
+_R2=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}:%{size_download}' \
+    "${BASE_URL}/${_RAND2}" 2>/dev/null || echo "000:0")
+_CODE1="${_R1%%:*}"; _SIZE1="${_R1##*:}"
+_CODE2="${_R2%%:*}"; _SIZE2="${_R2##*:}"
+
+if [[ "$QF_CODE" == "404" && "$_CODE1" == "404" && "$_CODE2" == "404" ]]; then
+    WEB_404_ONLY=true
+    warn "Server always returns 404 — directory brute-force suppressed (gobuster/feroxbuster skipped)"
+    warn "Manual inspection recommended: ${WHITE}${BASE_URL}${NC}"
+elif [[ "$_CODE1" == "200" && "$_CODE2" == "200" && "$_SIZE1" == "$_SIZE2" && "$_SIZE1" -gt 0 ]]; then
+    WEB_SOFT_404=true
+    WEB_SOFT_404_SIZE="$_SIZE1"
+    warn "Soft-404 detected — random paths return HTTP 200 (body size: ${WHITE}${_SIZE1}b${NC})"
+    warn "Adding --exclude-length ${_SIZE1} (gobuster) / --filter-size ${_SIZE1} (feroxbuster)"
+fi
+
 # Detect common applications from headers alone (runs in < 1s)
 if echo "$QF_SERVER $QF_POWERED $RAW_HEADERS" | grep -qiE 'tomcat|catalina|coyote'; then
     warn "Apache Tomcat detected on port ${PORT} — check /manager/html"
@@ -489,17 +523,26 @@ echo ""
 info "[4/10] Gobuster — quick directory scan (common.txt)"
 GB_QUICK_OUT="${WEB_DIR}/gobuster${SUFFIX}.txt"
 
-if command -v gobuster &>/dev/null; then
+if [[ "$WEB_404_ONLY" == "true" ]]; then
+    warn "[SKIP] Gobuster skipped — server returns 404 for all paths."
+    touch "$GB_QUICK_OUT"
+elif command -v gobuster &>/dev/null; then
     if [[ -n "$WL_QUICK" ]]; then
-        cmd "gobuster dir -u $BASE_URL -w $WL_QUICK -x $ENUM_EXTS -t 50 --no-error -k -b 403,404"
+        # Build exclude-length list: always exclude 0, add soft-404 size if detected
+        GB_EXCL="0"
+        [[ -n "$WEB_SOFT_404_SIZE" ]] && GB_EXCL="${GB_EXCL},${WEB_SOFT_404_SIZE}"
+
+        cmd "gobuster dir -u $BASE_URL -w $WL_QUICK -x $ENUM_EXTS -t 50 --no-error -k -b 403,404 --exclude-length $GB_EXCL"
         gobuster dir \
             -u "$BASE_URL" \
             -w "$WL_QUICK" \
             -x "$ENUM_EXTS" \
             -t 50 --no-error -k \
-            --exclude-length 0 \
+            --exclude-length "$GB_EXCL" \
             -b "403,404" \
-            -o "$GB_QUICK_OUT" 2>&1 | tee "${GB_QUICK_OUT}.log" || true
+            -o "$GB_QUICK_OUT" 2>&1 \
+            | grep -vE '^(={3,}|Gobuster v|by OJ|Starting gobuster|Finished$|Progress:|\[\+\] (Url|Method|Threads|Wordlist|Negative|User Agent|Extensions|Exclude|Timeout|Status)|^$)' \
+            | tee "${GB_QUICK_OUT}.log" || true
         ok "Gobuster quick done → ${WHITE}${GB_QUICK_OUT}${NC}"
     else
         warn "No quick wordlist found. Install dirb or seclists."
@@ -617,7 +660,9 @@ if command -v nikto &>/dev/null; then
     cmd "nikto -h $TARGET -port $PORT $NIKTO_SSL -ask no -maxtime 900 -timeout 10"
     nikto -h "$TARGET" -port "$PORT" $NIKTO_SSL \
         -ask no -maxtime 900 -timeout 10 \
-        -Format txt -output "$NIKTO_OUT" 2>&1 | tee "${NIKTO_OUT}.log" || true
+        -Format txt -output "$NIKTO_OUT" 2>&1 \
+        | grep -vE '(OSVDB-0:|013587|Suggested security header|Your Nikto installation is out of date|No web server found|use the -ssl)' \
+        | tee "${NIKTO_OUT}.log" || true
     # Nikto sometimes appends .txt.txt
     [[ -f "${NIKTO_OUT}.txt" ]] && mv "${NIKTO_OUT}.txt" "$NIKTO_OUT" 2>/dev/null || true
     ok "Nikto done → ${WHITE}${NIKTO_OUT}${NC}"
@@ -633,9 +678,16 @@ echo ""
 # ===========================================================================
 info "[7/10] Feroxbuster — recursive deep scan (medium wordlist)"
 
-if command -v feroxbuster &>/dev/null; then
+if [[ "$WEB_404_ONLY" == "true" ]]; then
+    warn "[SKIP] Feroxbuster skipped — server returns 404 for all paths."
+    touch "$FEROX_OUT"
+elif command -v feroxbuster &>/dev/null; then
     if [[ -n "$WL_MEDIUM" ]]; then
-        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403,404,400"
+        FEROX_SIZE_FILTER=""
+        [[ -n "$WEB_SOFT_404_SIZE" ]] && FEROX_SIZE_FILTER="--filter-size ${WEB_SOFT_404_SIZE}"
+
+        cmd "feroxbuster -u $BASE_URL -w $WL_MEDIUM -x $ENUM_EXTS -t 50 -k -q -d 2 --filter-status 403,404,400 $FEROX_SIZE_FILTER"
+        # shellcheck disable=SC2086
         feroxbuster \
             -u "$BASE_URL" \
             -w "$WL_MEDIUM" \
@@ -643,6 +695,7 @@ if command -v feroxbuster &>/dev/null; then
             -t 50 -k -q -d 2 \
             --filter-status 403,404,400 \
             --no-state \
+            $FEROX_SIZE_FILTER \
             -o "$FEROX_OUT" < /dev/null 2>&1 | tee "${FEROX_OUT}.log" || true
         ok "Feroxbuster done → ${WHITE}${FEROX_OUT}${NC}"
     else
@@ -660,7 +713,9 @@ elif [[ -n "$WL_MEDIUM" ]] && command -v gobuster &>/dev/null; then
         -t 50 --no-error -k \
         --exclude-length 0 \
         -b "403,404" \
-        -o "$FEROX_OUT" 2>&1 | tee "${FEROX_OUT}.log" || true
+        -o "$FEROX_OUT" 2>&1 \
+        | grep -vE '^(={3,}|Gobuster v|by OJ|Starting gobuster|Finished$|Progress:|\[\+\] (Url|Method|Threads|Wordlist|Negative|User Agent|Extensions|Exclude|Timeout|Status)|^$)' \
+        | tee "${FEROX_OUT}.log" || true
     ok "Gobuster deep done → ${WHITE}${FEROX_OUT}${NC}"
 else
     skip "feroxbuster and gobuster"

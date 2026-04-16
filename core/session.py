@@ -536,11 +536,14 @@ class Session:
             "|---|---------|------|",
             "| 1 | 🎯 Target Overview | [↓](#target-overview) |",
             "| 2 | ⚠️ Vulnerabilities & Critical Findings | [↓](#vulnerabilities--critical-findings) |",
-            "| 3 | 📋 OSCP Manual Checklist | [↓](#oscp-manual-checklist) |",
-            "| 4 | 🛠️ Attacker Setup | [↓](#attacker-setup--download-binaries-to-kali) |",
-            "| 5 | 🐚 Post-Shell Survival Kit | [↓](#post-shell-survival-kit) |",
-            f"| 6 | 💥 PrivEsc Arsenal | [↓]({_privesc_anchor}) |",
-            "| 7 | 🕸️ Pivoting & Tunnelling | [↓](#pivoting--tunnelling-arsenal) |",
+            "| 3 | 🌐 Web Enumeration | [↓](#web-enumeration) |",
+            "| 4 | 📋 OSCP Manual Checklist | [↓](#oscp-manual-checklist) |",
+            "| 5 | 💡 Manual Follow-Up Commands | [↓](#manual-follow-up-commands) |",
+            "| 6 | 📂 Output Files | [↓](#output-files) |",
+            "| 7 | 🛠️ Attacker Setup | [↓](#attacker-setup--download-binaries-to-kali) |",
+            "| 8 | 🐚 Post-Shell Survival Kit | [↓](#post-shell-survival-kit) |",
+            f"| 9 | 💥 PrivEsc Arsenal | [↓]({_privesc_anchor}) |",
+            "| 10 | 🕸️ Pivoting & Tunnelling | [↓](#pivoting--tunnelling-arsenal) |",
             "",
             "---",
             "",
@@ -574,46 +577,76 @@ class Session:
             lines.append("")
 
         # ── Alerts & Findings ─────────────────────────────────────────
-        # Partition notes into three buckets by keyword so the report
-        # presents the most critical information first.
+        # Partition notes into buckets. Exclude raw timeline/tool output lines
+        # that duplicate structured sections (version table, manual commands, etc.)
+        def _is_noise(n: str) -> bool:
+            """True for notes that are already presented in a dedicated section."""
+            nl = n.lower()
+            return (
+                nl.startswith("whatweb")             # raw WhatWeb first line
+                or re.match(r'^\[\d{2}:\d{2}:\d{2}\]\s+nmap found ports', nl)
+                or re.match(r'^version:\s+port', nl)  # already in versions table
+                or "💡" in n                           # manual commands section
+                or "[manual]" in nl                   # manual commands section
+                or nl.startswith("web server on port")  # redundant with table
+                or nl.startswith("hostname via redirect")  # in discoveries is fine
+            )
+
         vuln_notes = [n for n in self.info.notes if any(
             kw in n.lower() for kw in (
                 "vulnerable", "cve-", "signing disabled", "no_root_squash",
                 "unauthenticated", "empty password", "backdoor",
             )
-        )]
+        ) and not _is_noise(n)]
+
         success_notes = [n for n in self.info.notes if any(
             kw in n.lower() for kw in (
                 "anonymous", "anon login", "login allowed", "null session",
                 "guest", "permitted", "pong", "pwn3d",
             )
-        ) and n not in vuln_notes]
+        ) and n not in vuln_notes and not _is_noise(n)]
+
         discovery_notes = [n for n in self.info.notes if any(
             kw in n.lower() for kw in (
                 "found", "detected", "discovered", "export", "share",
-                "user", "san", "domain",
+                "user", "san", "domain", "hostname",
             )
-        ) and n not in vuln_notes and n not in success_notes]
+        ) and n not in vuln_notes and n not in success_notes and not _is_noise(n)]
 
         if vuln_notes:
             lines += ["## ⚠️ Vulnerabilities & Critical Findings", ""]
             for note in vuln_notes:
-                # Ensure emoji prefix is present
-                prefix = "" if note.startswith("⚠️") else "⚠️  "
-                lines.append(f"- {prefix}{note}")
+                clean_note = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s+', '', note)
+                prefix = "" if clean_note.startswith("⚠️") else "⚠️  "
+                # Format Python CVE lists as readable markdown
+                cve_m = re.search(r"CVEs?\s+(?:detected|found):\s*(\[.*?\])", clean_note)
+                if cve_m:
+                    try:
+                        import ast
+                        cve_list = ast.literal_eval(cve_m.group(1))
+                        before = clean_note[:cve_m.start(1)].strip().rstrip(":")
+                        lines.append(f"- {prefix}{before}:")
+                        for cve in cve_list:
+                            lines.append(f"  - `{cve}`")
+                    except Exception:
+                        lines.append(f"- {prefix}{clean_note}")
+                else:
+                    lines.append(f"- {prefix}{clean_note}")
             lines.append("")
 
         if success_notes:
             lines += ["## ✅ Confirmed Access & Anonymous Sessions", ""]
             for note in success_notes:
-                prefix = "" if note.startswith("✅") else "✅  "
-                lines.append(f"- {prefix}{note}")
+                clean_note = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s+', '', note)
+                prefix = "" if clean_note.startswith("✅") else "✅  "
+                lines.append(f"- {prefix}{clean_note}")
             lines.append("")
 
         if discovery_notes:
             lines += ["## 📁 Enumeration Discoveries", ""]
             for note in discovery_notes:
-                lines.append(f"- {note}")
+                clean_note = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s+', '', note)
+                lines.append(f"- {clean_note}")
             lines.append("")
 
         # ── Detected Versions + Searchsploit ─────────────────────────
@@ -715,21 +748,141 @@ class Session:
                 ]
             lines.append("")
 
-        # ── Web Paths ─────────────────────────────────────────────────
-        if self.info.web_paths:
-            lines += [
-                f"## 🌐 Web Paths ({len(self.info.web_paths)} discovered)",
-                "",
-                "```",
-            ]
-            for path in self.info.web_paths[:50]:
-                lines.append(path)
-            if len(self.info.web_paths) > 50:
-                lines.append(
-                    f"... and {len(self.info.web_paths) - 50} more "
-                    "(see web/ directory)"
+        # ── Web Enumeration Detail ────────────────────────────────────
+        web_dir = self.target_dir / "web"
+        if web_dir.exists():
+            lines += ["## 🌐 Web Enumeration", ""]
+
+            # Detect which ports were scanned (by looking for output files)
+            scanned_suffixes: List[str] = []
+            for f in sorted(web_dir.glob("headers*.txt")):
+                stem = f.stem.replace("headers", "")  # "" or "_port88" etc.
+                scanned_suffixes.append(stem)
+            if not scanned_suffixes:
+                scanned_suffixes = [""]  # fallback — at least one port scanned
+
+            for suffix in scanned_suffixes:
+                port_label = suffix.lstrip("_port") if suffix else "80/443"
+                lines += [f"### Port {port_label}", ""]
+
+                # HTTP Response Headers
+                headers_file = web_dir / f"headers{suffix}.txt"
+                if headers_file.exists() and headers_file.stat().st_size > 0:
+                    raw_hdrs = headers_file.read_text(errors="ignore").strip()
+                    if raw_hdrs:
+                        lines += ["**HTTP Response Headers:**", "", "```"]
+                        for hline in raw_hdrs.splitlines()[:30]:
+                            lines.append(hline)
+                        lines += ["```", ""]
+
+                # robots.txt
+                robots_file = web_dir / f"robots{suffix}.txt"
+                if robots_file.exists() and robots_file.stat().st_size > 0:
+                    robots_content = robots_file.read_text(errors="ignore").strip()
+                    if robots_content and not re.search(r'404|not found', robots_content, re.I):
+                        lines += ["**robots.txt:**", "", "```"]
+                        lines += robots_content.splitlines()[:40]
+                        lines += ["```", ""]
+
+                # WhatWeb — clean output (skip raw first-line dump)
+                whatweb_file = web_dir / f"whatweb{suffix}.txt"
+                if whatweb_file.exists() and whatweb_file.stat().st_size > 0:
+                    ww = whatweb_file.read_text(errors="ignore").strip()
+                    if ww:
+                        lines += ["**WhatWeb fingerprint:**", "", "```"]
+                        for wline in ww.splitlines()[:10]:
+                            lines.append(wline)
+                        lines += ["```", ""]
+
+                # Nikto key findings — read from .log (terminal-filtered output)
+                # Fall back to the full output file if .log is absent.
+                nikto_log  = web_dir / f"nikto{suffix}.txt.log"
+                nikto_full = web_dir / f"nikto{suffix}.txt"
+                nikto_src  = nikto_log if (nikto_log.exists() and nikto_log.stat().st_size > 0) else nikto_full
+                if nikto_src and nikto_src.exists() and nikto_src.stat().st_size > 0:
+                    nikto_raw = nikto_src.read_text(errors="ignore")
+                    # Keep only lines that start with "+ " (actual findings)
+                    nikto_findings = [
+                        ln.strip() for ln in nikto_raw.splitlines()
+                        if ln.strip().startswith("+ ") and "OSVDB-0:" not in ln
+                        and "Suggested security header" not in ln
+                    ]
+                    if nikto_findings:
+                        lines += [f"**Nikto findings ({len(nikto_findings)}):**", ""]
+                        for nf in nikto_findings:
+                            lines.append(f"- `{nf}`")
+                        lines.append("")
+
+                # SSL scan findings
+                sslscan_file = web_dir / f"sslscan{suffix}.txt"
+                if sslscan_file.exists() and sslscan_file.stat().st_size > 0:
+                    ssl_raw = sslscan_file.read_text(errors="ignore")
+                    ssl_lines = [
+                        ln.strip() for ln in ssl_raw.splitlines()
+                        if re.search(r'(enabled|Accepted|vulnerable|Heartbleed|EXPORT)', ln, re.I)
+                        and ln.strip()
+                    ]
+                    if ssl_lines:
+                        lines += ["**sslscan key findings:**", "", "```"]
+                        lines += ssl_lines[:30]
+                        lines += ["```", ""]
+
+                # API endpoints
+                api_file = web_dir / f"api_discovery{suffix}.txt"
+                if api_file.exists() and api_file.stat().st_size > 0:
+                    api_content = api_file.read_text(errors="ignore").strip()
+                    api_hits = [
+                        ln for ln in api_content.splitlines()
+                        if ln.strip() and not ln.startswith("#")
+                    ]
+                    if api_hits:
+                        lines += [f"**API endpoints ({len(api_hits)}):**", ""]
+                        for ah in api_hits:
+                            lines.append(f"- `{ah}`")
+                        lines.append("")
+
+            # Web paths — ALL of them, grouped by category
+            if self.info.web_paths:
+                _HIGHVAL_RE = re.compile(
+                    r'/(backup|\.git|\.svn|phpinfo|config|setup|install|admin'
+                    r'|phpmyadmin|manager|console|dashboard|wp-admin|xmlrpc'
+                    r'|\.env|\.htpasswd|web\.config|passwd|shadow'
+                    r'|download[s]?|upload[s]?|cdata|cgi-bin)',
+                    re.IGNORECASE,
                 )
-            lines += ["```", ""]
+                _SENSITIVE_RE = re.compile(
+                    r'\.(bak|old|zip|tar\.gz|sql|conf|env|ini|log|swp|txt)$',
+                    re.IGNORECASE,
+                )
+                _SCRIPT_RE = re.compile(r'\.(cgi|sh|pl|php|asp|aspx|jsp)$', re.IGNORECASE)
+
+                highval  = [p for p in self.info.web_paths if _HIGHVAL_RE.search(p)]
+                sensitiv = [p for p in self.info.web_paths if _SENSITIVE_RE.search(p) and p not in highval]
+                scripts  = [p for p in self.info.web_paths if _SCRIPT_RE.search(p) and p not in highval and p not in sensitiv]
+                other    = [p for p in self.info.web_paths if p not in highval and p not in sensitiv and p not in scripts]
+
+                lines.append(f"### All Discovered Paths ({len(self.info.web_paths)} total)")
+                lines.append("")
+
+                if highval:
+                    lines += [f"**🔴 High-value ({len(highval)}):**", "", "```"]
+                    lines += sorted(highval)
+                    lines += ["```", ""]
+
+                if sensitiv:
+                    lines += [f"**🟠 Sensitive files ({len(sensitiv)}):**", "", "```"]
+                    lines += sorted(sensitiv)
+                    lines += ["```", ""]
+
+                if scripts:
+                    lines += [f"**🟡 Scripts/executables ({len(scripts)}):**", "", "```"]
+                    lines += sorted(scripts)
+                    lines += ["```", ""]
+
+                if other:
+                    lines += [f"**Other ({len(other)}):**", "", "```"]
+                    lines += sorted(other)
+                    lines += ["```", ""]
 
         # ── OSCP Manual Checklist ─────────────────────────────────────
         lines += [
@@ -802,31 +955,71 @@ class Session:
                 "",
             ]
             for note in manual_notes:
-                # Strip leading timestamp "[HH:MM:SS] " for cleaner display
-                clean = note
-                if clean.startswith("[") and "]" in clean[:10]:
-                    clean = clean.split("] ", 1)[-1]
-                # Extract the command part (after 💡 [MANUAL])
-                cmd_part = clean.replace("💡", "").replace("[MANUAL]", "").strip()
-                lines.append(f"- [ ] 💡 `{cmd_part}`")
+                # Strip timestamp
+                clean = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s+', '', note)
+                # Strip 💡 and [MANUAL] markers
+                clean = clean.replace("💡", "").replace("[MANUAL]", "").strip()
+
+                # Split "Descriptive label: actual command" into two parts.
+                # A label is plain text (no shell metacharacters) before a colon.
+                label_match = re.match(r'^([A-Za-z][^:`|&;><$\n]{3,60}):\s+(.+)$', clean, re.DOTALL)
+                if label_match:
+                    label = label_match.group(1).strip()
+                    cmd   = label_match.group(2).strip()
+                    lines.append(f"- [ ] 💡 **{label}**")
+                    lines.append("  ```bash")
+                    for cmd_line in cmd.splitlines():
+                        lines.append(f"  {cmd_line}")
+                    lines.append("  ```")
+                else:
+                    lines.append("- [ ] 💡")
+                    lines.append("  ```bash")
+                    for cmd_line in clean.splitlines():
+                        lines.append(f"  {cmd_line}")
+                    lines.append("  ```")
             lines.append("")
 
-        # ── Full session notes (raw timeline) ─────────────────────────
-        non_manual = [
-            n for n in self.info.notes
-            if "💡" not in n and "[MANUAL]" not in n.upper()
+        # ── Output Files Index ────────────────────────────────────────
+        lines += [
+            "---",
+            "",
+            "## 📂 Output Files",
+            "",
+            f"> All files are under: `{self.target_dir}`",
+            "",
+            "| File | Description |",
+            "|------|-------------|",
         ]
-        if non_manual:
-            lines += [
-                "---",
-                "",
-                "## 📝 Session Timeline",
-                "",
-                "```",
-            ]
-            for note in non_manual:
-                lines.append(note)
-            lines += ["```", ""]
+        _FILE_DESCS = [
+            ("scans/recon.xml",            "Nmap XML — parsed for ports and service versions"),
+            ("scans/vulns.txt",            "NSE vuln script output — review for CVE mentions"),
+            ("web/headers*.txt",           "HTTP response headers (one per web port)"),
+            ("web/whatweb*.txt",           "WhatWeb technology fingerprint"),
+            ("web/gobuster*.txt",          "Gobuster directory scan results"),
+            ("web/feroxbuster*.txt",       "Feroxbuster recursive scan results"),
+            ("web/nikto*.txt",             "Nikto vulnerability scan output"),
+            ("web/dynamic_cgi_sniper*.txt","CGI/script sniper results (.cgi, .sh, .pl)"),
+            ("web/api_discovery*.txt",     "API endpoint discovery (Swagger, GraphQL, REST)"),
+            ("web/ffuf_vhost*.txt",        "Virtual host fuzzing results"),
+            ("web/sslscan*.txt",           "TLS/SSL cipher and protocol scan"),
+            ("smb/",                       "SMB enumeration output (shares, users, policies)"),
+            ("ldap/",                      "LDAP/AD enumeration output"),
+            ("_commands.log",              "Full audit trail — every command executed"),
+            ("session.json",               "Persisted session state (use with --resume)"),
+        ]
+        for fname, desc in _FILE_DESCS:
+            fpath = self.target_dir / fname.replace("*", "").replace(".txt", "").replace("/", "")
+            # Check for glob-style entries
+            if "*" in fname:
+                pattern = fname.split("/")[-1]
+                subdir  = fname.split("/")[0] if "/" in fname else ""
+                check_dir = self.target_dir / subdir if subdir else self.target_dir
+                exists = any(check_dir.glob(pattern)) if check_dir.exists() else False
+            else:
+                exists = (self.target_dir / fname).exists()
+            marker = "✅" if exists else "—"
+            lines.append(f"| {marker} `{fname}` | {desc} |")
+        lines.append("")
 
         # ── Arsenal Recommender ───────────────────────────────────────────
         # Import lazily to avoid circular deps at module load time.
@@ -996,40 +1189,53 @@ class Session:
                     f"sudo mount -t nfs {ip}:{export} /mnt/nfs_enum && ls -la /mnt/nfs_enum/",
                 ))
 
-        # Sensitive/high-value web content
-        seen_paths: set = set()
+        # Sensitive/high-value web content — group into one entry per type
+        sensitive_paths: List[str] = []
+        highval_paths:   List[str] = []
+        download_urls:   List[str] = []
+        _seen_web: set = set()
+
         for note in self.info.notes:
             m = re.search(r'SENSITIVE FILE:\s*(\S+)', note)
-            if m:
-                path = m.group(1)
-                if path not in seen_paths:
-                    seen_paths.add(path)
-                    steps.append((
-                        "high",
-                        f"Sensitive file in web root: {path}",
-                        f"curl -so /tmp/loot_{Path(path).name} http://{ip}{path} && file /tmp/loot_{Path(path).name}",
-                    ))
+            if m and m.group(1) not in _seen_web:
+                _seen_web.add(m.group(1))
+                sensitive_paths.append(m.group(1))
             m2 = re.search(r'HIGH-VALUE PATH:\s*(\S+)', note)
-            if m2:
-                path = m2.group(1)
-                if path not in seen_paths:
-                    seen_paths.add(path)
-                    steps.append((
-                        "high",
-                        f"High-value web path: {path}",
-                        f"curl -sv http://{ip}{path} 2>&1 | head -60",
-                    ))
+            if m2 and m2.group(1) not in _seen_web:
+                _seen_web.add(m2.group(1))
+                highval_paths.append(m2.group(1))
+            m3 = re.search(r'DOWNLOAD FILE:\s*(https?://\S+)', note)
+            if m3 and m3.group(1) not in _seen_web:
+                _seen_web.add(m3.group(1))
+                download_urls.append(m3.group(1))
 
-        # Web file download hints
-        for note in self.info.notes:
-            m = re.search(r'DOWNLOAD FILE:\s*(https?://\S+)', note)
-            if m:
-                url = m.group(1)
-                steps.append((
-                    "high",
-                    f"Downloadable file found: {url}",
-                    f"wget '{url}' -O /tmp/loot_file && file /tmp/loot_file && strings /tmp/loot_file | grep -i pass",
-                ))
+        if highval_paths and _once("highval_paths"):
+            path_list = "\n".join(f"curl -sv http://{ip}{p} 2>&1 | head -60" for p in highval_paths[:10])
+            steps.append((
+                "high",
+                f"{len(highval_paths)} high-value web path(s) — inspect each",
+                path_list,
+            ))
+        if sensitive_paths and _once("sensitive_paths"):
+            path_list = "\n".join(
+                f"curl -so /tmp/loot_{Path(p).name} http://{ip}{p} && file /tmp/loot_{Path(p).name}"
+                for p in sensitive_paths[:10]
+            )
+            steps.append((
+                "high",
+                f"{len(sensitive_paths)} sensitive file(s) in web root — download and inspect",
+                path_list,
+            ))
+        if download_urls and _once("download_urls"):
+            url_cmds = "\n".join(
+                f"wget '{u}' -O /tmp/loot_{Path(u).name} && strings /tmp/loot_{Path(u).name} | grep -iE 'pass|user|key|token'"
+                for u in download_urls[:5]
+            )
+            steps.append((
+                "high",
+                f"{len(download_urls)} downloadable file(s) — inspect for credentials",
+                url_cmds,
+            ))
 
         # Apache old version → searchsploit
         for note in self.info.notes:

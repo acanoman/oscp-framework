@@ -1106,11 +1106,7 @@ class Engine:
                             f"[dim]{_esc(stripped[5:].strip())}[/dim]"
                         )
                     elif stripped.startswith("[MANUAL]"):
-                        from rich.markup import escape as _esc
-                        self.console.print(
-                            f"  [magenta][MANUAL][/magenta] "
-                            f"[dim magenta]{_esc(stripped[8:].strip())}[/dim magenta]"
-                        )
+                        pass  # suppress inline — operator reads findings panel / log
                     elif stripped.startswith("[*]"):
                         content = stripped[3:].strip()
                         # Step header: [N/X] or [N.M/X] → visual separator rule
