@@ -59,6 +59,22 @@ echo -e "  ${BOLD}============================================================${
 echo ""
 
 # ===========================================================================
+# Per-step interrupt handler
+# Ctrl+C (1st) → skip step, continue  |  Ctrl+C (2nd, <5s) → abort module
+# ===========================================================================
+STEP_SKIPPED=false; _LAST_SIGINT_TS=0; SKIP_ABORT_WINDOW=5
+_sigint_step() {
+    local now; now=$(date +%s)
+    if (( now - _LAST_SIGINT_TS < SKIP_ABORT_WINDOW )); then
+        warn "Second Ctrl+C — aborting enumeration for ${TARGET}"; exit 130
+    fi
+    _LAST_SIGINT_TS=$now; STEP_SKIPPED=true
+    echo ""; warn "⚡ Step interrupted — continuing to next step"
+    warn "   (press Ctrl+C again within ${SKIP_ABORT_WINDOW}s to abort entire module)"; echo ""
+}
+trap '_sigint_step' INT
+
+# ===========================================================================
 # Step 1 — RPC portmapper dump (always run first — reveals all RPC services)
 # ===========================================================================
 info "[1/4] RPC portmapper dump"
