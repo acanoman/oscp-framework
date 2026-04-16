@@ -830,6 +830,11 @@ class Engine:
         and VULNERABLE keyword lines.  Surfaces findings as CRITICAL/HIGH notes so
         they appear in the attack path and report sections automatically.
 
+        Two note formats are emitted:
+          - Legible human format:  "CRITICAL: NSE vuln scan CVEs found: [...]"
+          - Pipe-delimited stable: "CRITICAL|NSE_VULN|port=<P>|cves=<CVE1,CVE2,...>"
+            (one entry per port; port='unknown' when CVEs cannot be associated)
+
         Called immediately when the background scan process exits.
         """
         from pathlib import Path as _Path
@@ -842,7 +847,33 @@ class Engine:
         except OSError:
             return
 
-        # Extract all CVE references
+        # ── Parse port ↔ CVE associations ──────────────────────────────────
+        # Walk the file linearly; `current_port` tracks the most recent
+        # "<N>/tcp open" header.  CVE lines that appear before any port header
+        # are filed under 'unknown'.
+        port_cves: Dict[str, List[str]] = {}
+        current_port = "unknown"
+        _port_re = re.compile(r'^\s*(\d+)/tcp\s+open\b')
+        _cve_re  = re.compile(r'CVE-\d{4}-\d+')
+
+        for line in content.splitlines():
+            pm = _port_re.match(line)
+            if pm:
+                current_port = pm.group(1)
+                continue
+            for cve in _cve_re.findall(line):
+                bucket = port_cves.setdefault(current_port, [])
+                if cve not in bucket:
+                    bucket.append(cve)
+
+        # Emit pipe-delimited per-port notes (stable parsing surface)
+        for port, port_cve_list in port_cves.items():
+            cves_str = ",".join(port_cve_list[:25])   # cap per-port list to 25 CVEs
+            pipe_note = f"CRITICAL|NSE_VULN|port={port}|cves={cves_str}"
+            if pipe_note not in self.session.info.notes:
+                self.session.add_note(pipe_note)
+
+        # ── Legible aggregate note (backward-compatible) ───────────────────
         cves = sorted(set(re.findall(r'CVE-\d{4}-\d+', content)))
         if cves:
             self.session.add_note(f"CRITICAL: NSE vuln scan CVEs found: {cves[:15]}")
@@ -864,7 +895,8 @@ class Engine:
 
         if cves or vuln_lines:
             self.log.info(
-                "vulns.txt parsed: %d CVEs, %d VULNERABLE lines", len(cves), len(vuln_lines)
+                "vulns.txt parsed: %d CVEs across %d ports, %d VULNERABLE lines",
+                len(cves), len(port_cves), len(vuln_lines),
             )
 
     def _resolve_modules(self) -> List[str]:

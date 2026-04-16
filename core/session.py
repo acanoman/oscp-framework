@@ -1148,6 +1148,36 @@ class Session:
                 ))
                 break
 
+        # NSE pipe-delimited per-port CVE entries (structured — one step per CVE)
+        # Format: CRITICAL|NSE_VULN|port=<N|unknown>|cves=<CVE1,CVE2,...>
+        _nse_cves_seen: set = set()
+        _pipe_re = re.compile(
+            r'CRITICAL\|NSE_VULN\|port=(\d+|unknown)\|cves=([^|]+)$'
+        )
+        for note in self.info.notes:
+            pm = _pipe_re.search(note)
+            if not pm:
+                continue
+            port = pm.group(1)
+            cves = [c.strip() for c in pm.group(2).split(",") if c.strip()]
+            for cve in cves:
+                if cve in _nse_cves_seen:
+                    continue
+                _nse_cves_seen.add(cve)
+                if port == "unknown":
+                    url_part = f"http://{ip}:<PORT>"
+                    port_label = "unknown port"
+                else:
+                    url_part = f"http://{ip}:{port}"
+                    port_label = f"port {port}"
+                cve_lower = cve.lower()
+                steps.append((
+                    "critical",
+                    f"NSE CVE: {cve} ({port_label})",
+                    f"searchsploit {cve}\n"
+                    f"  nuclei -t cves/{cve_lower}.yaml -u {url_part}",
+                ))
+
         # ── HIGH ─────────────────────────────────────────────────────────────
 
         # Readable SMB shares
