@@ -18,6 +18,7 @@ _PORT_LABELS = {
     23:    "Telnet",
     25:    "SMTP",
     53:    "DNS",
+    69:    "TFTP",
     80:    "HTTP",
     88:    "Kerberos",
     110:   "POP3",
@@ -29,11 +30,15 @@ _PORT_LABELS = {
     389:   "LDAP",
     443:   "HTTPS",
     445:   "SMB",
+    464:   "KerberosPW",
     636:   "LDAPS",
     873:   "Rsync",
+    993:   "IMAPS",
+    995:   "POP3S",
     1433:  "MSSQL",
     1521:  "Oracle",
     2049:  "NFS",
+    2375:  "Docker-API",
     3268:  "LDAP-GC",
     3306:  "MySQL",
     3389:  "RDP",
@@ -42,9 +47,12 @@ _PORT_LABELS = {
     5985:  "WinRM",
     5986:  "WinRM-S",
     6379:  "Redis",
+    8000:  "HTTP-8000",
     8080:  "HTTP-Alt",
     8443:  "HTTPS-Alt",
     9200:  "Elasticsearch",
+    10000: "Webmin",
+    11211: "Memcached",
     27017: "MongoDB",
 }
 
@@ -52,13 +60,69 @@ _PORT_LABELS = {
 _SUGGESTIONS = {
     "FTP": [
         "Try anonymous login: ftp {ip}",
-        "Check for writable directories",
-        "Look for sensitive files (config, backup, etc.)",
+        "Check for writable directories (put test file)",
+        "Look for sensitive files (config, backup, .sql, id_rsa)",
+        "Check banner for version → searchsploit vsftpd/proftpd/pure-ftpd",
+        "If bounce scan works: nmap -b anonymous@{ip} -p 22,80 TARGET2",
     ],
     "SSH": [
         "Note the banner / version for CVE research",
         "Check for username enumeration if version is old",
         "Try default credentials only if explicitly in scope",
+    ],
+    "TELNET": [
+        "Capture banner: nc -nv {ip} 23",
+        "Try default credentials (router/IoT admin:admin, root:root)",
+        "Check if cleartext creds flow (Wireshark / tcpdump)",
+    ],
+    "SMTP": [
+        "Enumerate users: smtp-user-enum -M VRFY -U users.txt -t {ip}",
+        "Check open relay: swaks --to test@example.com --from test@{ip} --server {ip}",
+        "Grab banner: nc -nv {ip} 25 → note SMTP server for CVEs",
+    ],
+    "TFTP": [
+        "Try to fetch config files: tftp {ip} -c get config.cfg (Cisco/router)",
+        "Common filenames: startup-config, running-config, /etc/passwd",
+        "Check writable: tftp {ip} -c put test.txt",
+    ],
+    "DNS": [
+        "Try zone transfer: dig axfr @{ip} {domain}",
+        "Enumerate subdomains with dnsrecon or gobuster dns",
+        "Check for DNSSEC and BIND version: dig @{ip} version.bind CHAOS TXT",
+        "Try reverse lookup for nearby hosts: dig -x {ip} @{ip}",
+    ],
+    "POP3": [
+        "Grab banner: nc -nv {ip} 110",
+        "Try auth: USER/PASS with known credentials if obtained",
+        "Check for CAPA / STLS support",
+    ],
+    "POP3S": [
+        "Grab cert: openssl s_client -connect {ip}:995",
+        "Check for SANs / domain names in cert",
+    ],
+    "RPC": [
+        "Enumerate services: rpcinfo -p {ip}",
+        "Check for NFS exports via RPC: showmount -e {ip}",
+        "Look for exposed ypbind/nis services",
+    ],
+    "MSRPC": [
+        "Enumerate endpoints: rpcclient -U '' -N {ip}",
+        "Commands: srvinfo, enumdomusers, enumdomgroups, querydominfo",
+        "Cross-reference with 135/139/445 for SMB/AD context",
+    ],
+    "NETBIOS": [
+        "Enumerate NetBIOS names: nmblookup -A {ip}",
+        "Check null session: smbclient -L //{ip} -N",
+        "Useful for pre-Windows 2000 systems and workgroups",
+    ],
+    "IMAP": [
+        "Grab banner: nc -nv {ip} 143",
+        "Check CAPABILITY for STARTTLS/LOGIN support",
+        "Try auth with known credentials if obtained",
+    ],
+    "IMAPS": [
+        "Grab cert: openssl s_client -connect {ip}:993",
+        "Note server software and domain names in cert",
     ],
     "HTTP": [
         "Run gobuster/ffuf for directory enumeration",
@@ -72,12 +136,28 @@ _SUGGESTIONS = {
         "Check TLS version and certificate for domain names",
         "Look for virtual hosts via certificate SANs",
     ],
-    "SMB": [
-        "Try null session: smbclient -L //{ip} -N",
-        "Enumerate shares: smbmap -H {ip}",
-        "Check guest access on each share",
-        "Run enum4linux -a {ip}",
-        "Check for EternalBlue (MS17-010) if older Windows",
+    "HTTP-ALT": [
+        "Same as HTTP (port 80) — directory brute, vhost, headers",
+        "Often admin panels, Jenkins, Tomcat manager, dev environments",
+        "Check /manager/html (Tomcat), /console (WebLogic), /jmx-console (JBoss)",
+    ],
+    "HTTPS-ALT": [
+        "Same as HTTPS (port 443) — directory brute, cert SANs, TLS version",
+        "Often admin/management UI — check /admin, /login, /console",
+    ],
+    "HTTP-8000": [
+        "Common for dev servers, Django, SimpleHTTPServer, Python web apps",
+        "Check directory indexing: curl -s http://{ip}:8000/",
+        "Try /admin, /api, /debug endpoints",
+    ],
+    "KERBEROS": [
+        "Enumerate users: kerbrute userenum -d {domain} --dc {ip} users.txt",
+        "AS-REP roast: GetNPUsers.py {domain}/ -no-pass -usersfile users.txt -dc-ip {ip}",
+        "Kerberoast with valid creds: GetUserSPNs.py {domain}/USER:PASS -dc-ip {ip}",
+    ],
+    "KERBEROSPW": [
+        "Companion port to 88/Kerberos — password change protocol",
+        "Confirms AD DC presence — investigate 88, 389, 445 together",
     ],
     "LDAP": [
         "Anonymous bind: ldapsearch -x -H ldap://{ip} -b ''",
@@ -85,35 +165,103 @@ _SUGGESTIONS = {
         "Check for AS-REP roasting (no pre-auth accounts)",
         "Dump naming contexts for domain info",
     ],
+    "LDAPS": [
+        "Same as LDAP but over TLS: ldapsearch -x -H ldaps://{ip} -b ''",
+        "Grab cert SANs: openssl s_client -connect {ip}:636",
+    ],
+    "LDAP-GC": [
+        "Global Catalog port (3268) — queries whole AD forest",
+        "ldapsearch -x -H ldap://{ip}:3268 -b '' — broader scope than 389",
+    ],
+    "SMB": [
+        "Try null session: smbclient -L //{ip} -N",
+        "Enumerate shares: smbmap -H {ip}",
+        "Check guest access on each share",
+        "Run enum4linux -a {ip}",
+        "Check for EternalBlue (MS17-010) if older Windows",
+    ],
+    "SNMP": [
+        "Try community string 'public': snmpwalk -c public -v1 {ip}",
+        "Enumerate with onesixtyone: onesixtyone -c community.txt {ip}",
+        "Bulk community brute: hydra -P community.txt {ip} snmp",
+        "Full MIB walk: snmpwalk -c public -v1 {ip} .1.3.6.1.2.1.25.4.2",
+        "Users/processes: snmpwalk -c public -v1 {ip} 1.3.6.1.4.1.77.1.2.25 (Windows)",
+    ],
     "MSSQL": [
         "Try sa:sa or sa:(blank) credentials",
         "Check for xp_cmdshell if authenticated",
         "Enumerate linked servers",
     ],
-    "MySQL": [
-        "Try root:(blank) or root:root",
-        "Enumerate databases if authenticated",
-    ],
-    "RDP": [
-        "Note version — check for BlueKeep (CVE-2019-0708) on old systems",
-        "Try known credentials if obtained",
-    ],
-    "WinRM": [
-        "If credentials obtained: evil-winrm -i {ip} -u USER -p PASS",
-        "Check HTTP and HTTPS ports (5985/5986)",
-    ],
-    "DNS": [
-        "Try zone transfer: dig axfr @{ip} {domain}",
-        "Enumerate subdomains with dnsrecon or gobuster dns",
+    "ORACLE": [
+        "SID enumeration: odat sidguesser -s {ip} -p 1521",
+        "Try default creds: system/manager, sys/change_on_install",
+        "Enumerate with oscanner or tnscmd10g",
     ],
     "NFS": [
         "List shares: showmount -e {ip}",
         "Mount and inspect: mount -t nfs {ip}:/share /mnt/",
         "Check for no_root_squash permission",
     ],
-    "SNMP": [
-        "Try community string 'public': snmpwalk -c public -v1 {ip}",
-        "Enumerate with onesixtyone: onesixtyone -c community.txt {ip}",
+    "DOCKER-API": [
+        "Check exposed API: curl -s http://{ip}:2375/version",
+        "List containers: curl -s http://{ip}:2375/containers/json",
+        "If writable → container escape / host compromise (high impact)",
+    ],
+    "MYSQL": [
+        "Try root:(blank) or root:root",
+        "Enumerate databases if authenticated",
+    ],
+    "POSTGRESQL": [
+        "Try default: postgres:postgres, postgres:(blank)",
+        "Check version: psql -h {ip} -U postgres -c 'SELECT version();'",
+        "If auth: check pg_read_server_files, COPY FROM PROGRAM (RCE)",
+    ],
+    "RDP": [
+        "Note version — check for BlueKeep (CVE-2019-0708) on old systems",
+        "Try known credentials if obtained",
+    ],
+    "VNC": [
+        "Check auth required: vncviewer {ip}",
+        "Some versions allow no-auth or weak passwords",
+        "Grab password hash if local access available",
+    ],
+    "WINRM": [
+        "If credentials obtained: evil-winrm -i {ip} -u USER -p PASS",
+        "Check HTTP and HTTPS ports (5985/5986)",
+    ],
+    "WINRM-S": [
+        "HTTPS variant of WinRM — evil-winrm -i {ip} -S -u USER -p PASS",
+        "Accept self-signed cert: -S flag",
+    ],
+    "RSYNC": [
+        "List modules: rsync rsync://{ip}/",
+        "Download if readable: rsync -av rsync://{ip}/module/ ./loot/",
+        "Check for writable modules (could drop ssh keys, cron jobs)",
+    ],
+    "REDIS": [
+        "Unauth check: redis-cli -h {ip} INFO",
+        "Config get dir — look for /var/lib/redis, /home/USER/.ssh",
+        "Known attack: write SSH key via CONFIG SET dir + SAVE (manual only)",
+    ],
+    "ELASTICSEARCH": [
+        "Cluster info: curl -s http://{ip}:9200/",
+        "List indices: curl -s http://{ip}:9200/_cat/indices",
+        "Dump docs: curl -s http://{ip}:9200/INDEX/_search?pretty",
+    ],
+    "WEBMIN": [
+        "Check version: curl -sI http://{ip}:10000/",
+        "Historical RCEs: CVE-2019-15107 (<=1.920), CVE-2019-15231",
+        "Try default creds admin:admin, root:(blank)",
+    ],
+    "MEMCACHED": [
+        "Stats: echo 'stats' | nc {ip} 11211",
+        "Dump keys: memcdump --servers={ip}:11211",
+        "Check for sensitive data caches (sessions, tokens)",
+    ],
+    "MONGODB": [
+        "Unauth check: mongo --host {ip} --eval 'db.adminCommand({{listDatabases:1}})'",
+        "Enumerate DBs: show dbs",
+        "Look for sensitive collections (users, tokens, credit)",
     ],
 }
 
