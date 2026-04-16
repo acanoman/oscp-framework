@@ -170,6 +170,12 @@ SERVICE_MODULE_MAP: Dict[str, str] = {
 # version detection failed)
 # ---------------------------------------------------------------------------
 
+# Nmap service labels that are unreliable indicators — trigger an HTTP(S) probe
+# to resolve them to a concrete protocol before routing modules or printing hints.
+_AMBIGUOUS_SVC_LABELS: set = {
+    "", "unknown", "tcpwrapped", "kerberos-sec", "http-proxy",
+}
+
 _PORT_FALLBACK_MAP: Dict[int, str] = {
     # ── Tier 1 ──────────────────────────────────────────────────────────
     21:    "ftp",
@@ -436,6 +442,9 @@ class Engine:
                 "Skipping Nmap — ports already known from previous session: %s",
                 sorted(self.info.open_ports),
             )
+
+        # Phase 1.5 — Disambiguate fuzzy service labels (http-proxy / tcpwrapped / unknown)
+        self._disambiguate_services()
 
         # Phase 2 — Determine modules
         modules_to_run = self._resolve_modules()
@@ -899,6 +908,58 @@ class Engine:
                 len(cves), len(port_cves), len(vuln_lines),
             )
 
+    def _disambiguate_services(self) -> None:
+        """
+        For ports whose Nmap service label is ambiguous (unknown, tcpwrapped,
+        kerberos-sec, http-proxy, blank), probe HTTPS then HTTP via curl -skI.
+        If the port responds with an HTTP status line, store the resolved protocol
+        in port_details[port]["resolved_proto"] so the recommender and module
+        router can treat it as HTTP(S) without overwriting the original Nmap label.
+
+        This method only writes 'resolved_proto' — never mutates the 'service' field.
+        """
+        if not self.info.open_ports:
+            return
+
+        candidates = [
+            p for p in sorted(self.info.open_ports)
+            if self.info.port_details.get(p, {}).get("service", "").strip().lower()
+               in _AMBIGUOUS_SVC_LABELS
+        ]
+        if not candidates:
+            return
+
+        self.log.info("Disambiguator: probing %d ambiguous port(s): %s",
+                      len(candidates), candidates)
+
+        for port in candidates:
+            resolved = None
+            for scheme in ("https", "http"):
+                try:
+                    result = subprocess.run(
+                        ["curl", "-skI", "-m", "5", f"{scheme}://{self.target}:{port}/"],
+                        capture_output=True, text=True, timeout=8, check=False,
+                    )
+                    first_line = (result.stdout or "").splitlines()[:1]
+                    if first_line and first_line[0].startswith("HTTP/"):
+                        resolved = scheme
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    continue
+
+            if resolved:
+                self.info.port_details.setdefault(port, {})["resolved_proto"] = resolved
+                label = self.info.port_details[port].get("service", "") or "blank"
+                self.console.print(
+                    f"  [bold green][+][/bold green] Port {port} "
+                    f"([dim]{label}[/dim]) → disambiguated as [bold cyan]{resolved}[/bold cyan]"
+                )
+                self.session.add_note(
+                    f"INFO: Port {port} service '{label}' disambiguated as {resolved} "
+                    f"(curl probe returned HTTP response line)"
+                )
+                self.log.info("Port %d ('%s') resolved_proto=%s", port, label, resolved)
+
     def _resolve_modules(self) -> List[str]:
         """
         Return a tier-sorted list of module names to execute.
@@ -927,12 +988,24 @@ class Engine:
             seen: set       = set()
 
             for port in sorted(self.info.open_ports):
-                details = self.info.port_details.get(port, {})
-                svc_raw = details.get("service", "").strip()
-                mod     = None
+                details  = self.info.port_details.get(port, {})
+                svc_raw  = details.get("service", "").strip()
+                resolved = details.get("resolved_proto", "").strip()
+                mod      = None
+
+                # ── Pass 0: disambiguator override ──────────────────────
+                # If the disambiguator identified a concrete HTTP(S) protocol
+                # for an ambiguous label, route it through the web module.
+                if resolved in ("http", "https"):
+                    mod = _svc_to_module(resolved)
+                    if mod:
+                        self.log.info(
+                            "Port %-5d resolved_proto=%-5s → %-10s [disambiguator]",
+                            port, resolved, mod,
+                        )
 
                 # ── Pass 1: service-name routing ────────────────────────
-                if svc_raw and svc_raw.lower() not in ("unknown", ""):
+                if mod is None and svc_raw and svc_raw.lower() not in ("unknown", ""):
                     mod = _svc_to_module(svc_raw)
                     if mod:
                         self.log.info(

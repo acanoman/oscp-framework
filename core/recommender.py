@@ -311,9 +311,12 @@ class Recommender:
         table.add_column("Version", style="dim")
 
         for port in sorted(self.info.open_ports):
-            details = self.info.port_details.get(port, {})
-            svc     = details.get("service", _PORT_LABELS.get(port, "?"))
-            ver     = details.get("version", "") or ""
+            details  = self.info.port_details.get(port, {})
+            svc      = details.get("service", _PORT_LABELS.get(port, "?"))
+            ver      = details.get("version", "") or ""
+            resolved = details.get("resolved_proto", "")
+            if resolved:
+                svc = f"{svc} → {resolved}"
             table.add_row(str(port), svc, ver)
 
         self.console.print()
@@ -359,7 +362,14 @@ class Recommender:
 
         suggested_any = False
         for port in sorted(self.info.open_ports):
-            label = _PORT_LABELS.get(port, "")
+            details  = self.info.port_details.get(port, {})
+            resolved = details.get("resolved_proto", "").strip().lower()
+            if resolved == "http":
+                label = "HTTP"
+            elif resolved == "https":
+                label = "HTTPS"
+            else:
+                label = _PORT_LABELS.get(port, "")
             hints = _SUGGESTIONS.get(label, [])
             if hints:
                 self.console.print(
