@@ -164,36 +164,75 @@ fi
 
 # ===========================================================================
 # SSH — port 22
+#
+# Encapsulated in ssh_enum() so the auth-method probe runs ONCE against the
+# server (not once per candidate user).  The previous per-user loop produced
+# misleading "[+] SSH accepts password auth for user: root/admin/..." lines
+# — nmap's ssh-auth-methods only reports which auth methods the SERVER
+# advertises, it never validates whether a specific username exists.
 # ===========================================================================
-if has_port 22; then
+ssh_enum() {
     mkdir -p "${OUTPUT_DIR}/ssh"
-    info "[SSH] Port 22 — SSH audit + auth method enumeration"
+    local ssh_dir="${OUTPUT_DIR}/ssh"
 
+    info "[SSH] Port 22 — banner grab + audit + auth-method enumeration"
+
+    # ---- Banner grab (raw TCP, no auth attempt) --------------------------
+    local banner_file="${ssh_dir}/ssh_banner.txt"
+    cmd "nc -nv -w 3 $TARGET 22 (SSH banner)"
+    local banner
+    banner=$(timeout 5 bash -c "echo '' | nc -nv -w 3 $TARGET 22" 2>&1 || true)
+    echo "$banner" > "$banner_file"
+
+    # Extract the SSH-2.0-* banner line (server version string)
+    local ssh_version
+    ssh_version=$(echo "$banner" | grep -oP 'SSH-[0-9.]+-\S+' | head -1 || true)
+    [[ -n "$ssh_version" ]] && ok "SSH banner: ${WHITE}${ssh_version}${NC}"
+
+    # ---- OpenSSH version detection (CVE-2018-15473 — user enum by timing) ----
+    # Real user enumeration vulnerability: OpenSSH ≤ 7.7 reveals whether a
+    # user exists via response-time differences during SSH2_MSG_USERAUTH_REQUEST.
+    if [[ -n "$ssh_version" ]] && echo "$ssh_version" | grep -qi 'openssh'; then
+        local openssh_ver
+        openssh_ver=$(echo "$ssh_version" | grep -oP 'OpenSSH_\K[0-9]+\.[0-9]+[p0-9]*' | head -1 || true)
+        if [[ -n "$openssh_ver" ]]; then
+            local major minor
+            major=$(echo "$openssh_ver" | cut -d. -f1)
+            minor=$(echo "$openssh_ver" | cut -d. -f2 | grep -oE '^[0-9]+' || echo 0)
+            if (( major < 7 )) || (( major == 7 && minor <= 7 )); then
+                warn "${RED}CRITICAL: OpenSSH ${openssh_ver} ≤ 7.7 — CVE-2018-15473 (real user enumeration via timing)${NC}"
+                {
+                    echo "CVE-2018-15473 — OpenSSH ≤ 7.7 username enumeration"
+                    echo "Version detected: ${openssh_ver}"
+                    echo "Exploit: searchsploit 45233"
+                    echo "Usage:   python3 45233.py ${TARGET} -p 22 -u users.txt"
+                } > "${ssh_dir}/ssh_cve_2018_15473.txt"
+                ok "CVE details → ${WHITE}${ssh_dir}/ssh_cve_2018_15473.txt${NC}"
+            fi
+        fi
+    fi
+
+    # ---- ssh-audit (keeps rich CVE + algorithm analysis if installed) ----
     if command -v ssh-audit &>/dev/null; then
-        SSH_AUDIT_OUT="${OUTPUT_DIR}/ssh/ssh_audit.txt"
+        local ssh_audit_out="${ssh_dir}/ssh_audit.txt"
         cmd "ssh-audit --skip-rate-test $TARGET"
-        # Save full output to file — strip ANSI colour codes so grep/display works cleanly
         ssh-audit --skip-rate-test "$TARGET" 2>&1 \
             | sed 's/\x1b\[[0-9;]*m//g' \
-            > "$SSH_AUDIT_OUT" || true
+            > "$ssh_audit_out" || true
 
-        # Print only the signal lines to the terminal — skip algorithm noise
-        # (kex/enc/mac/key info lines and rec/nfo advisory lines).
-        # Keep: (gen) banner, (fin) fingerprints, fail/warn lines with CVE.
         echo ""
-        info "[SSH-AUDIT] Summary (full output → ${SSH_AUDIT_OUT})"
+        info "[SSH-AUDIT] Summary (full output → ${ssh_audit_out})"
         grep -E '^\(gen\)|^\(fin\)|\[fail\].*CVE-|\[warn\].*CVE-|\[fail\].*broken|\[fail\].*deprecated' \
-            "$SSH_AUDIT_OUT" 2>/dev/null \
-            | sed 's/^\(gen\)/  (gen)/' \
-            | sed 's/^\(fin\)/  (fin)/' \
+            "$ssh_audit_out" 2>/dev/null \
             | while IFS= read -r line; do
                 echo "  $line"
               done || true
 
-        if grep -qiE 'CVE-' "$SSH_AUDIT_OUT" 2>/dev/null; then
-            SSH_CVES=$(grep -oP 'CVE-\d+-\d+' "$SSH_AUDIT_OUT" 2>/dev/null \
+        if grep -qiE 'CVE-' "$ssh_audit_out" 2>/dev/null; then
+            local ssh_cves
+            ssh_cves=$(grep -oP 'CVE-\d+-\d+' "$ssh_audit_out" 2>/dev/null \
                 | sort -u | head -5 | tr '\n' ' ' || true)
-            warn "SSH CVEs found: ${RED}${SSH_CVES}${NC}"
+            warn "SSH CVEs (from ssh-audit): ${RED}${ssh_cves}${NC}"
         else
             ok "No CVEs flagged by ssh-audit"
         fi
@@ -203,23 +242,56 @@ if has_port 22; then
         hint "Install ssh-audit:  pip3 install ssh-audit"
     fi
 
-    # Auth method enumeration for common users (no brute force — reads metadata only)
-    for SSH_USER in root admin user www-data; do
-        AUTH_OUT="${OUTPUT_DIR}/ssh/ssh_auth_${SSH_USER}.txt"
-        cmd "nmap -p22 --script ssh-auth-methods --script-args ssh.user=$SSH_USER -Pn $TARGET"
-        nmap -p22 \
-            --script ssh-auth-methods \
-            --script-args "ssh.user=${SSH_USER}" \
-            -Pn "$TARGET" \
-            -oN "$AUTH_OUT" 2>&1 | tee "$AUTH_OUT" || true
+    # ---- Weak algorithm detection via NSE (independent signal) ----
+    local algos_out="${ssh_dir}/ssh2_enum_algos.txt"
+    cmd "nmap -p22 --script ssh2-enum-algos -Pn $TARGET"
+    nmap -p22 --script ssh2-enum-algos -Pn "$TARGET" \
+        -oN "$algos_out" 2>&1 | tee "$algos_out" || true
 
-        if grep -qi "password" "$AUTH_OUT" 2>/dev/null; then
-            ok "SSH accepts password auth for user: ${WHITE}${SSH_USER}${NC}"
+    if grep -qiE '(diffie-hellman-group1-sha1|diffie-hellman-group-exchange-sha1|arcfour|3des-cbc|blowfish-cbc|hmac-md5|hmac-sha1-96)' \
+            "$algos_out" 2>/dev/null; then
+        warn "SSH weak algorithm(s) offered — review ${algos_out}"
+    fi
+
+    # ---- Advertised auth methods (server-wide, NOT per-user) ----
+    # Probes with a throwaway username so the answer reflects what the server
+    # accepts in principle, not whether the username exists.
+    local auth_probe_out="${ssh_dir}/ssh_auth_methods.txt"
+    cmd "nmap -p22 --script ssh-auth-methods --script-args ssh.user=oscp-probe -Pn $TARGET"
+    nmap -p22 --script ssh-auth-methods \
+        --script-args 'ssh.user=oscp-probe' -Pn "$TARGET" \
+        -oN "$auth_probe_out" 2>&1 | tee "$auth_probe_out" || true
+
+    local auth_methods
+    auth_methods=$(grep -oP 'Supported authentication methods[^)]*\)\s*\K.*' "$auth_probe_out" 2>/dev/null \
+        | head -1 | tr -d '\r' || true)
+    if [[ -z "$auth_methods" ]]; then
+        # Fallback: extract the listed methods under the "auth methods" block
+        auth_methods=$(grep -A4 'ssh-auth-methods' "$auth_probe_out" 2>/dev/null \
+            | grep -oE '(publickey|password|keyboard-interactive|hostbased|gssapi-with-mic|none)' \
+            | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+    fi
+
+    if [[ -n "$auth_methods" ]]; then
+        info "SSH server advertises auth methods: ${WHITE}${auth_methods}${NC}  (NO confirma existencia de users)"
+        echo "auth_methods=${auth_methods}" >> "$auth_probe_out"
+    else
+        info "Could not parse advertised auth methods — review ${auth_probe_out}"
+    fi
+
+    # ---- Host keys (ssh-keyscan) ----
+    if command -v ssh-keyscan &>/dev/null; then
+        local hostkey_out="${ssh_dir}/ssh_hostkeys.txt"
+        cmd "ssh-keyscan -T 5 $TARGET"
+        ssh-keyscan -T 5 "$TARGET" 2>/dev/null > "$hostkey_out" || true
+        if [[ -s "$hostkey_out" ]]; then
+            local key_count
+            key_count=$(wc -l < "$hostkey_out" 2>/dev/null || echo 0)
+            ok "SSH host keys saved (${key_count} entries) → ${WHITE}${hostkey_out}${NC}"
         fi
-    done
-
-    cat "${OUTPUT_DIR}"/ssh/ssh_auth_*.txt \
-        > "${OUTPUT_DIR}/ssh/ssh_auth_methods.txt" 2>/dev/null || true
+    else
+        skip "ssh-keyscan"
+    fi
 
     hint "SSH brute force (manual — only if explicitly authorized):
     hydra -L users.txt -P /usr/share/wordlists/rockyou.txt ssh://${TARGET}
@@ -227,6 +299,10 @@ if has_port 22; then
     # Private key login (if you find id_rsa):
     ssh -i id_rsa <user>@${TARGET}"
     echo ""
+}
+
+if has_port 22; then
+    ssh_enum
 fi
 
 # ===========================================================================
