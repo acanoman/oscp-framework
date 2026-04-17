@@ -31,6 +31,7 @@ from rich.panel import Panel
 from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
+from core.cve_database import match_by_version, match_by_nmap_script
 from core.display import module_start, module_done, info, pipe, success, warn, error, findings_panel, recon_port_table
 
 
@@ -445,6 +446,7 @@ class Engine:
 
         # Phase 1.5 — Disambiguate fuzzy service labels (http-proxy / tcpwrapped / unknown)
         self._disambiguate_services()
+        self._match_versions_against_cvedb()
 
         # Phase 2 — Determine modules
         modules_to_run = self._resolve_modules()
@@ -902,6 +904,58 @@ class Engine:
                 self.session.add_note(note)
                 warn(f"NSE: {vline}")
 
+        # ── NSE script-block → CVE_DB correlation ──────────────────────────
+        # Walk line-by-line tracking (current_port, current_script).  A script
+        # block starts at `| <name>:` or `|_<name>:` and ends at the next port
+        # header / script header / non-pipe line.  Each completed block is
+        # handed to match_by_nmap_script (which self-gates on VULNERABLE/CVE
+        # tokens in the block text).
+        _script_hdr_re = re.compile(r'^\|_?([a-z][a-z0-9_-]+):\s*$')
+        cur_port = "unknown"
+        cur_script: Optional[str] = None
+        cur_block: List[str] = []
+        script_blocks: List[tuple] = []
+
+        for line in content.splitlines():
+            pm = _port_re.match(line)
+            if pm:
+                if cur_script and cur_block:
+                    script_blocks.append((cur_port, cur_script, "\n".join(cur_block)))
+                cur_script = None
+                cur_block = []
+                cur_port = pm.group(1)
+                continue
+            sm = _script_hdr_re.match(line)
+            if sm:
+                if cur_script and cur_block:
+                    script_blocks.append((cur_port, cur_script, "\n".join(cur_block)))
+                cur_script = sm.group(1)
+                cur_block = []
+                continue
+            if cur_script is not None:
+                if line.startswith("|"):
+                    cur_block.append(line)
+                else:
+                    if cur_block:
+                        script_blocks.append((cur_port, cur_script, "\n".join(cur_block)))
+                    cur_script = None
+                    cur_block = []
+        if cur_script and cur_block:
+            script_blocks.append((cur_port, cur_script, "\n".join(cur_block)))
+
+        cvedb_emitted = 0
+        for port_s, script_s, block_text in script_blocks:
+            for cve in match_by_nmap_script(script_s, block_text):
+                note = (
+                    f"CRITICAL|CVE_DB|cve={cve['id']}|port={port_s}"
+                    "|source=nse_script"
+                )
+                if note not in self.session.info.notes:
+                    self.session.add_note(note)
+                    cvedb_emitted += 1
+        if cvedb_emitted:
+            self.log.info("CVE_DB nse-script emitted %d notes", cvedb_emitted)
+
         if cves or vuln_lines:
             self.log.info(
                 "vulns.txt parsed: %d CVEs across %d ports, %d VULNERABLE lines",
@@ -959,6 +1013,39 @@ class Engine:
                     f"(curl probe returned HTTP response line)"
                 )
                 self.log.info("Port %d ('%s') resolved_proto=%s", port, label, resolved)
+
+    def _match_versions_against_cvedb(self) -> None:
+        """
+        For every open port with a non-empty service + version, look up CVEs in
+        the CVE knowledge base via version_regex. Emits one pipe-delimited note
+        per (port, CVE):
+
+            CRITICAL|CVE_DB|cve=<CVE-ID>|port=<P>|source=version_match
+
+        Runs after the disambiguator (which may fill resolved_proto) but the
+        match is driven by service+version banners from Nmap, not resolved_proto.
+        """
+        if not self.info.open_ports:
+            return
+
+        emitted = 0
+        for port in sorted(self.info.open_ports):
+            details = self.info.port_details.get(port, {})
+            service = (details.get("service") or "").strip()
+            version = (details.get("version") or "").strip()
+            if not version:
+                continue
+            matches = match_by_version(service, version)
+            for cve in matches:
+                note = (
+                    f"CRITICAL|CVE_DB|cve={cve['id']}|port={port}"
+                    "|source=version_match"
+                )
+                if note not in self.session.info.notes:
+                    self.session.add_note(note)
+                    emitted += 1
+        if emitted:
+            self.log.info("CVE_DB version-match emitted %d notes", emitted)
 
     def _resolve_modules(self) -> List[str]:
         """
