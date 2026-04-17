@@ -230,11 +230,12 @@ for VNC_PORT in 5900 5800 5901 5902; do
     vncviewer ${TARGET}:${VNC_PORT}
     # With password:
     vncviewer -passwd <passwd_file> ${TARGET}:${VNC_PORT}
-    # Brute force (authorized only):
+    # Brute force (authorized only) — OSCP-safe (no MSF):
     hydra -P /usr/share/wordlists/rockyou.txt vnc://${TARGET}:${VNC_PORT}
-    # Metasploit scanner:
-    use auxiliary/scanner/vnc/vnc_login
-    set RHOSTS ${TARGET}; set RPORT ${VNC_PORT}; run"
+    # ⚠️ OSCP: Metasploit limited to 1 machine per exam
+    # [MSF-RESTRICTED] Metasploit alternative:
+    # use auxiliary/scanner/vnc/vnc_login
+    # set RHOSTS ${TARGET}; set RPORT ${VNC_PORT}; run"
         echo ""
     fi
 done

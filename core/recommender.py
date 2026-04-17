@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Optional
 from rich.console import Console
 from rich.table import Table
 
+from core.oscp_compliance import check_command, print_reminder
+
 if TYPE_CHECKING:
     from core.session import TargetInfo
 
@@ -380,7 +382,14 @@ class Recommender:
                         ip=ip,
                         domain=self.info.domain or "TARGET_DOMAIN",
                     )
-                    self.console.print(f"    [dim]-[/dim] {formatted}")
+                    is_restricted, tool = check_command(formatted)
+                    if is_restricted:
+                        self.console.print(
+                            f"    [bold yellow][OSCP-RESTRICTED: {tool}][/bold yellow] "
+                            f"[dim]{formatted}[/dim]"
+                        )
+                    else:
+                        self.console.print(f"    [dim]-[/dim] {formatted}")
                 suggested_any = True
 
         if not suggested_any:
@@ -389,3 +398,6 @@ class Recommender:
             )
 
         self.console.print()
+
+        # OSCP exam-compliance reminder (always last)
+        print_reminder(self.console)
