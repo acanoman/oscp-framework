@@ -10,6 +10,7 @@ from rich.markup import escape as _esc
 from rich.table import Table
 
 from core.oscp_compliance import check_command, print_reminder
+from core.cve_database import match_by_port
 
 if TYPE_CHECKING:
     from core.session import TargetInfo
@@ -406,6 +407,40 @@ class Recommender:
                         )
                     else:
                         self.console.print(f"    [dim]-[/dim] {formatted}")
+                suggested_any = True
+
+            # Known CVEs sub-block (from cve_database — pre-sorted by severity,
+            # capped at 5 per port; critical entries preserved by the sort).
+            known_cves = match_by_port(port)[:5]
+            if known_cves:
+                if not hints:
+                    header_label = label or "port"
+                    self.console.print(
+                        f"\n  [bold cyan][ {header_label} — port {port} ][/bold cyan]"
+                    )
+                self.console.print("    [bold red]Known CVEs:[/bold red]")
+                for cve in known_cves:
+                    cve_id = cve.get("id", "?")
+                    name = cve.get("name", "")
+                    sev = cve.get("severity", "INFO")
+                    sev_color = {
+                        "CRITICAL": "red",
+                        "HIGH": "bright_yellow",
+                        "MEDIUM": "yellow",
+                    }.get(sev, "dim")
+                    line = (
+                        f"      [{sev_color}][{sev}][/{sev_color}] "
+                        f"{cve_id} — {_esc(name)}"
+                    )
+                    msf = cve.get("msf_module")
+                    if msf:
+                        msf_cmd = f"msfconsole -x 'use {msf}; run'"
+                        is_r, tool = check_command(msf_cmd)
+                        if is_r:
+                            line += (
+                                f"  [bold yellow][OSCP-RESTRICTED: {tool}][/bold yellow]"
+                            )
+                    self.console.print(line)
                 suggested_any = True
 
         if not suggested_any:
