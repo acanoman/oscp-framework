@@ -30,6 +30,8 @@ manual commands to run — nothing is executed automatically.
 - Generates a `notes.md` report after every module (always up to date)
 - Synthesizes all findings into a **🎯 Prioritized Attack Path** panel at end of run
 - Detects SMBv1, NTLM relay risk, AS-REP Roastable users, Kerberoastable SPNs, SSH CVEs, Apache versions, high-value web paths, downloadable files, LDAP description-field passwords, vhosts, DNS AXFR results, and more
+- **Service disambiguator** — probes ports with ambiguous Nmap labels (`unknown`, `tcpwrapped`, `http-proxy`) via `curl -skI` and resolves them to HTTP/HTTPS when applicable
+- **CVE database cross-match** — every open port is tested against a curated knowledge base of 36 OSCP-relevant CVEs (Windows/AD, Linux privesc, web apps, classic services). Matches surface as a per-port **Known CVEs** panel plus attack-path entries with OSCP-safe manual commands
 - Emits every attack-adjacent command as a `[MANUAL]` hint — copy-paste ready, never auto-executed
 - Writes `_manual_commands.txt` — a standalone file with every manual hint, one per line, ready to paste
 - Writes `_commands.log` — a full timestamped audit trail of every command executed
@@ -52,8 +54,9 @@ manual commands to run — nothing is executed automatically.
 | Requirement | ARGUS Behaviour |
 | ----------- | --------------- |
 | No automated exploitation | All attack chains are `[MANUAL]` hints only — the framework never executes exploits |
-| No prohibited tools | SQLMap, mass scanners, and automated brute-force are never invoked |
-| Metasploit not used | Zero Metasploit references in any wrapper or Python module |
+| Metasploit tagged as restricted | MSF modules referenced in the CVE database and recommender hints are prefixed with `[OSCP-RESTRICTED: msfconsole]` — never auto-invoked, and the 1-machine exam rule is surfaced to the operator |
+| SQLMap prohibited | Any hint containing `sqlmap` is flagged via `check_command` with `[OSCP-RESTRICTED: sqlmap]`; a manual UNION / boolean / time-based SQLi guide is surfaced instead |
+| No mass scanners / auto brute-force | Mass scanners and unattended credential brute-force are never invoked — spray commands appear as `[MANUAL]` hints only |
 | All commands shown first | Every subprocess call is logged with a `[CMD]` prefix before execution |
 | Attack commands = hints only | AS-REP Roast, Kerberoast, NTLM Relay, spray commands appear as `[MANUAL]` hints |
 | No auto-download from shares | SMB share download commands shown as manual hints only |
@@ -293,6 +296,11 @@ manual step in priority order:
 │  🟡 MEDIUM    AS-REP Roasting — find accounts without pre-auth         │
 │               impacket-GetNPUsers CORP/ -dc-ip 10.10.10.5 -no-pass ... │
 │                                                                          │
+│  🔴 CRITICAL  CVE-2017-0144 — EternalBlue (MS17-010) (port 445)        │
+│               [src: nse_script]                                         │
+│               Manual exploit:  searchsploit -m 42315                    │
+│                                python3 42315.py 10.10.10.5             │
+│                                                                          │
 │  🔵 INFO      47 web paths discovered                                  │
 │               cat output/.../web/gobuster*.txt | sort | uniq           │
 │                                                                          │
@@ -337,6 +345,41 @@ Nmap's service detection output and well-known port fallbacks.
 | SNMP | Community strings, processes, users |
 | MAIL | Valid SMTP users |
 | DB | Empty/unauthenticated database access |
+
+---
+
+## CVE Database
+
+ARGUS ships a curated CVE knowledge base in [core/cve_database.py](core/cve_database.py)
+— **36 OSCP-relevant entries** across four categories:
+
+| Category | Count | Examples |
+| -------- | ----- | -------- |
+| Windows / Active Directory | 9 | EternalBlue, MS08-067, Zerologon, SMBGhost, PrintNightmare, BlueKeep, Certifried, noPac (42278 + 42287) |
+| Linux privilege escalation | 7 | Shellshock, DirtyCow, PwnKit, Baron Samedit, SambaCry, DirtyPipe, Netfilter UAF |
+| Web applications | 10 | Log4Shell, Apache 2.4.49 / 2.4.50 path traversal, Struts2 (S2-045, S2-061), Spring4Shell, Confluence (OGNL + Widget), Heartbleed, WebLogic, ActiveMQ |
+| Classic / misc services | 10 | HFS Rejetto, Icecast, Nostromo, ProFTPD mod_copy, vsftpd 2.3.4 backdoor, distcc, Samba usermap, Ghostcat, JBoss deserialization |
+
+Every open port triggers two correlation passes after recon:
+
+1. **Version match** — the Nmap `service + version` banner is tested against each CVE's `version_regex` (conservative — prefers false negatives)
+2. **NSE script match** — the background `vuln,auth` scan output is parsed per-port, per-script; blocks are fed to `match_by_nmap_script` which self-gates on `VULNERABLE` / `CVE-` tokens to suppress false positives from mere script execution
+
+Both paths emit pipe-delimited notes:
+
+```text
+CRITICAL|CVE_DB|cve=CVE-2017-0144|port=445|source=version_match
+CRITICAL|CVE_DB|cve=CVE-2017-0144|port=445|source=nse_script
+```
+
+These are consumed by:
+
+- **Attack-path builder** ([core/session.py](core/session.py)) — renders each CVE as a manual step with `format_cve_for_attack_path(...)` output. Shares a dedup set with the NSE_VULN channel so the same CVE never renders twice.
+- **Recommender** ([core/recommender.py](core/recommender.py)) — per-port **Known CVEs** sub-block, capped at 5 entries (pre-sorted by severity in the CVE-DB index, so CRITICALs are always preserved)
+
+Entries with an `msf_module` field synthesize the natural invocation (`msfconsole -x 'use <module>; run'`) and feed it to `oscp_compliance.check_command`, which attaches `[OSCP-RESTRICTED: msfconsole]` — the operator always sees the restriction next to the command.
+
+7 `searchsploit_id` values are currently marked `# TODO: verify EDB-ID` pending manual confirmation against exploit-db.com.
 
 ---
 
