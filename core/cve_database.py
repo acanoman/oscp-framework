@@ -1044,8 +1044,7 @@ def match_by_nmap_script(script_name: str, output: str) -> List[Dict[str, Any]]:
 
 def _fmt_placeholders(text: str, ip: str, port: Optional[int]) -> str:
     out = text.replace("{ip}", ip or "TARGET")
-    if port is not None:
-        out = out.replace("{port}", str(port))
+    out = out.replace("{port}", str(port) if port is not None else "<PORT>")
     return out
 
 

@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from core.cve_database import CVE_DATABASE, format_cve_for_attack_path
+
 
 # ---------------------------------------------------------------------------
 # Directory layout under output/targets/<IP>/
@@ -1178,6 +1180,34 @@ class Session:
                     f"searchsploit {cve}\n"
                     f"  nuclei -t cves/{cve_lower}.yaml -u {url_part}",
                 ))
+
+        # CVE_DB pipe-delimited entries (structured knowledge-base matches).
+        # Format: CRITICAL|CVE_DB|cve=<CVE-ID>|port=<P>|source=(version_match|nse_script)
+        # Shares _nse_cves_seen so a CVE flagged by BOTH NSE_VULN and CVE_DB
+        # channels renders exactly once.
+        _cve_db_by_id = {c["id"]: c for c in CVE_DATABASE}
+        _cvedb_re = re.compile(
+            r'CRITICAL\|CVE_DB\|cve=(CVE-\d{4}-\d+)\|port=(\d+|unknown)\|source=(\w+)$'
+        )
+        for note in self.info.notes:
+            m = _cvedb_re.search(note)
+            if not m:
+                continue
+            cve_id, port, source = m.group(1), m.group(2), m.group(3)
+            if cve_id in _nse_cves_seen:
+                continue
+            entry = _cve_db_by_id.get(cve_id)
+            if entry is None:
+                continue
+            _nse_cves_seen.add(cve_id)
+            port_label = "unknown port" if port == "unknown" else f"port {port}"
+            port_int = None if port == "unknown" else int(port)
+            _title, body, _refs = format_cve_for_attack_path(entry, ip, port_int)
+            severity = (entry.get("severity") or "INFO").lower()
+            description = (
+                f"{cve_id} — {entry.get('name', '')} ({port_label}) [src: {source}]"
+            )
+            steps.append((severity, description, body))
 
         # ── HIGH ─────────────────────────────────────────────────────────────
 
