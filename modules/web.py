@@ -11,6 +11,7 @@ Port → protocol detection:
 
 import re
 import shutil
+import textwrap
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -374,10 +375,13 @@ def _parse_whatweb(web_dir: Path, suffix: str, session, log) -> Optional[str]:
             if detected is None:
                 detected = cms
 
-    # Extract server/framework info (first line summary)
+    # Extract server/framework info (first line summary).
+    # textwrap.shorten breaks at word boundaries with an ellipsis — cleaner
+    # than a hard slice when the first line contains long plugin strings.
     first_line = content.splitlines()[0] if content.strip() else ""
     if first_line:
-        session.add_note(f"WhatWeb{suffix}: {first_line[:120]}")
+        short_title = textwrap.shorten(first_line, width=60, placeholder="...")
+        session.add_note(f"WhatWeb{suffix}: {short_title}")
 
     # Apache version detection — extract and flag potentially old versions
     apache_m = re.search(r'Apache[/\[\s]+([\d]+\.[\d]+\.?[\d]*)', content, re.IGNORECASE)

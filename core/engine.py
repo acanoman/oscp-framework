@@ -1138,7 +1138,17 @@ class Engine:
             )):
                 findings.append(("info", note))
 
-        findings_panel(module_name, findings)
+        # Dedup — same (severity, note) can surface twice when a finding is
+        # re-emitted across module sub-phases (e.g. HTTP + HTTPS web scans).
+        seen_findings: set = set()
+        deduped_findings = []
+        for sev, note in findings:
+            key = (sev, note)
+            if key not in seen_findings:
+                seen_findings.add(key)
+                deduped_findings.append((sev, note))
+
+        findings_panel(module_name, deduped_findings)
 
     # ------------------------------------------------------------------
     # Command execution

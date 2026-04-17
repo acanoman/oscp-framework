@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from rich.console import Console
+from rich.markup import escape as _esc
 from rich.table import Table
 
 from core.oscp_compliance import check_command, print_reminder
@@ -329,33 +330,48 @@ class Recommender:
         if self.info.os_guess and self.info.os_guess != "Unknown":
             colour = _OS_COLOUR.get(self.info.os_guess, "white")
             self.console.print(
-                f"  [bold]OS Guess[/bold]  : [bold {colour}]{self.info.os_guess}[/bold {colour}]"
+                f"  [bold]OS Guess[/bold]  : "
+                f"[bold {colour}]{_esc(self.info.os_guess)}[/bold {colour}]"
             )
 
         if self.info.domains_found:
             self.console.print(
-                f"  [bold]🌐 Domains[/bold]  : {', '.join(self.info.domains_found)}"
+                f"  [bold]🌐 Domains[/bold]  : "
+                f"{_esc(', '.join(self.info.domains_found))}"
             )
 
         if self.info.shares_found:
             self.console.print(
-                f"  [bold]📂 Shares[/bold]   : [green]{', '.join(self.info.shares_found)}[/green]"
+                f"  [bold]📂 Shares[/bold]   : "
+                f"[green]{_esc(', '.join(self.info.shares_found))}[/green]"
             )
 
         if self.info.users_found:
             self.console.print(
-                f"  [bold]🔑 Users[/bold]    : [green]{', '.join(self.info.users_found)}[/green]"
+                f"  [bold]🔑 Users[/bold]    : "
+                f"[green]{_esc(', '.join(self.info.users_found))}[/green]"
             )
 
         if self.info.web_paths:
+            # Defensive case-insensitive dedup — should already be deduped on
+            # insertion, but guard against case-only variants from different
+            # scanners (ffuf vs gobuster).
+            seen_lower = set()
+            unique_paths = []
+            for p in self.info.web_paths:
+                key = p.lower()
+                if key not in seen_lower:
+                    seen_lower.add(key)
+                    unique_paths.append(p)
+
             self.console.print(
-                f"\n  [bold]🌐 Web Paths[/bold] ({len(self.info.web_paths)} found):"
+                f"\n  [bold]🌐 Web Paths[/bold] ({len(unique_paths)} found):"
             )
-            for p in self.info.web_paths[:20]:
-                self.console.print(f"    [dim]{p}[/dim]")
-            if len(self.info.web_paths) > 20:
+            for p in unique_paths[:20]:
+                self.console.print(f"    [dim]{_esc(p)}[/dim]")
+            if len(unique_paths) > 20:
                 self.console.print(
-                    f"    [dim]... and {len(self.info.web_paths) - 20} more[/dim]"
+                    f"    [dim]... and {len(unique_paths) - 20} more[/dim]"
                 )
 
         # ── Manual next steps ───────────────────────────────────────
