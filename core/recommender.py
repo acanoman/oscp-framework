@@ -378,6 +378,10 @@ class Recommender:
         # ── Manual next steps ───────────────────────────────────────
         self.console.print()
         self.console.rule("[bold yellow] MANUAL NEXT STEPS [/bold yellow]")
+        self.console.print(
+            "  [dim]Commands below are [bold yellow][SUGGESTED][/bold yellow] — "
+            f"operator runs manually. IP already substituted ([bold]{_esc(ip)}[/bold]).[/dim]"
+        )
 
         suggested_any = False
         for port in sorted(self.info.open_ports):
@@ -394,6 +398,10 @@ class Recommender:
                 self.console.print(
                     f"\n  [bold cyan][ {label} — port {port} ][/bold cyan]"
                 )
+                self.console.print(
+                    "  [bold yellow]💡 [SUGGESTED][/bold yellow] "
+                    "[dim yellow]— run manually:[/dim yellow]"
+                )
                 for hint in hints:
                     formatted = hint.format(
                         ip=ip,
@@ -402,11 +410,11 @@ class Recommender:
                     is_restricted, tool = check_command(formatted)
                     if is_restricted:
                         self.console.print(
-                            f"    [bold yellow][OSCP-RESTRICTED: {tool}][/bold yellow] "
-                            f"[dim]{formatted}[/dim]"
+                            f"     [bold yellow][OSCP-RESTRICTED: {tool}][/bold yellow] "
+                            f"[yellow]{_esc(formatted)}[/yellow]"
                         )
                     else:
-                        self.console.print(f"    [dim]-[/dim] {formatted}")
+                        self.console.print(f"     [yellow]{_esc(formatted)}[/yellow]")
                 suggested_any = True
 
             # Known CVEs sub-block (from cve_database — pre-sorted by severity,

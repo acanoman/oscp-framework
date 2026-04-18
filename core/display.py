@@ -53,6 +53,63 @@ def hint(msg: str) -> None:
     console.print()
 
 
+# ── Command / Suggestion markers ─────────────────────────────────────────
+# Two clearly differentiated visual styles so the operator never confuses
+# what the framework JUST RAN vs. what they should RUN MANUALLY.
+
+_BOX_WIDTH = 72  # width of the top/bottom rules around executed commands
+
+
+def cmd_executed(cmd_str: str) -> None:
+    """
+    Boxed cyan [CMD EXECUTED] marker printed BEFORE the command's output.
+
+    Visual:
+        ┌─── [CMD EXECUTED] ─────────────────────
+        │ nmap -p22 --script ssh-auth-methods 10.10.10.10
+        └─────────────────────────────────────────
+        <output follows>
+    """
+    console.print()
+    header = " [CMD EXECUTED] "
+    pad = max(3, _BOX_WIDTH - len(header) - 2)
+    console.print(f"[cyan]┌──[bold]{header}[/bold]{'─' * pad}[/cyan]")
+    console.print(f"[cyan]│[/cyan] [bold bright_cyan]{escape(cmd_str)}[/bold bright_cyan]")
+    console.print(f"[cyan]└{'─' * (_BOX_WIDTH - 1)}[/cyan]")
+
+
+def cmd_output_end() -> None:
+    """Thin separator rule printed AFTER a command's output ends."""
+    console.print(f"[dim cyan]{'─' * _BOX_WIDTH}[/dim cyan]")
+
+
+def cmd_suggested(cmds, note: str = "run manually") -> None:
+    """
+    Yellow [SUGGESTED] block — command(s) the OPERATOR should run manually.
+    Never has output below it; the operator is responsible for execution.
+
+    Visual:
+        💡 [SUGGESTED] — run manually:
+           hydra -L users.txt -P rockyou.txt ssh://10.10.10.10
+           ssh -i id_rsa <user>@10.10.10.10
+    """
+    if isinstance(cmds, str):
+        cmds = [cmds]
+    if not cmds:
+        return
+    console.print()
+    console.print(
+        f"[bold yellow]💡 [SUGGESTED][/bold yellow] "
+        f"[dim yellow]— {escape(note)}:[/dim yellow]"
+    )
+    for c in cmds:
+        for line in str(c).strip().split("\n"):
+            s = line.strip()
+            if s:
+                console.print(f"   [yellow]{escape(s)}[/yellow]")
+    console.print()
+
+
 def module_start(name: str) -> None:
     """Print a separator and 'Starting <name>...' line."""
     console.print(f"\n[cyan]{'═' * 44}[/cyan]")

@@ -32,7 +32,11 @@ from core.session import Session, TargetInfo
 from core.parser import NmapParser
 from core.recommender import Recommender
 from core.cve_database import match_by_version, match_by_nmap_script
-from core.display import module_start, module_done, info, pipe, success, warn, error, findings_panel, recon_port_table
+from core.display import (
+    module_start, module_done, info, pipe, success, warn, error,
+    findings_panel, recon_port_table,
+    cmd_executed, cmd_output_end, cmd_suggested,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1264,14 +1268,24 @@ class Engine:
         display_cmd = " ".join(str(c) for c in cmd)
         tag = "DRY-RUN" if self.dry_run else "CMD"
         self.log.info("[%s] %s", tag, display_cmd)
-        info(f"> {display_cmd}")
+        cmd_executed(display_cmd)
 
         if self.dry_run:
+            cmd_output_end()
             return None
 
         name         = label or cmd[0]
         attempts     = 1 + max(0, retries)   # total executions
         last_rc: int = -1
+
+        # Track whether a [CMD EXECUTED] box is currently open. Starts True
+        # because cmd_executed(display_cmd) above opened the outer wrapper box.
+        _cmd_active = [True]
+
+        def _close_box():
+            if _cmd_active[0]:
+                cmd_output_end()
+                _cmd_active[0] = False
 
         for attempt in range(1, attempts + 1):
             proc = None
@@ -1302,20 +1316,26 @@ class Engine:
                             f"  [red][-][/red] [dim]{_esc(stripped[3:].strip())}[/dim]"
                         )
                     elif stripped.startswith("[CMD]"):
-                        from rich.markup import escape as _esc
-                        self.console.print(
-                            f"  [dim yellow][CMD][/dim yellow] "
-                            f"[dim]{_esc(stripped[5:].strip())}[/dim]"
-                        )
+                        _close_box()
+                        cmd_executed(stripped[5:].strip())
+                        _cmd_active[0] = True
                     elif stripped.startswith("[MANUAL]"):
-                        pass  # suppress inline — operator reads findings panel / log
+                        _close_box()
+                        cmd_suggested(stripped[8:].strip())
+                    elif stripped.startswith("[SUGGESTED]"):
+                        _close_box()
+                        cmd_suggested(stripped[11:].strip())
                     elif stripped.startswith("[*]"):
                         content = stripped[3:].strip()
                         # Step header: [N/X] or [N.M/X] → visual separator rule
+                        # with blank padding for readability.
                         if re.match(r'\[\d+\.?\d*/\d+\]', content):
+                            _close_box()
+                            self.console.print()
                             self.console.rule(
                                 f"[bold cyan] {content} [/bold cyan]", style="cyan"
                             )
+                            self.console.print()
                         else:
                             info(content)
                     elif stripped.startswith("[SKIP]"):
@@ -1333,6 +1353,7 @@ class Engine:
                             pipe(line)
                     self.log.debug("exec: %s", line)
                 proc.wait()
+                _close_box()
                 last_rc = proc.returncode if proc.returncode is not None else 0
 
                 if last_rc == 0:
@@ -1357,6 +1378,7 @@ class Engine:
                 return last_rc
 
             except KeyboardInterrupt:
+                _close_box()
                 # Kill the child (start_new_session means Ctrl-C doesn't reach it)
                 if proc is not None:
                     try:
@@ -1370,6 +1392,7 @@ class Engine:
                 raise
 
             except FileNotFoundError:
+                _close_box()
                 error(f"Command not found: {cmd[0]} — is the wrapper executable?")
                 self.log.error("Command not found: %s", cmd[0])
                 return -1
