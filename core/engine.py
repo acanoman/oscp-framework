@@ -1235,6 +1235,7 @@ class Engine:
         _HIGH_KW = (
             "ssh cve", "password auth", "empty password", "weak",
             "anonymous ftp", "anonymous smb", "eternalblue",
+            "outdated", "missing header", "x-frame", "clickjacking",
         )
         _ACCESS_KW = (
             "anonymous", "null session", "anon login", "guest login",
@@ -1264,6 +1265,9 @@ class Engine:
             elif any(kw in low for kw in (
                 "found", "discovered", "share", "user", "domain",
                 "hostname", "export", "san", "path",
+                "whatweb", "cms", "api endpoint", "nikto", "loot",
+                "fingerprint", "vhost", "header", "cgi", "interesting",
+                "leaked",
             )):
                 findings.append(("info", note))
 

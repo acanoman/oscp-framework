@@ -3,7 +3,8 @@ core/recommender.py — OSCP-style suggestion engine
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional
+import re
+from typing import TYPE_CHECKING, List, Optional
 
 from rich.console import Console
 from rich.markup import escape as _esc
@@ -14,6 +15,32 @@ from core.cve_database import match_by_port
 
 if TYPE_CHECKING:
     from core.session import TargetInfo
+
+# Generic tokens that leak into domains_found from loose regex parsers
+# (e.g. "Domain Name: for WORKGROUP" → captured "for"). Filter at display.
+_DOMAIN_STOPWORDS = {
+    "for", "the", "and", "or", "workgroup", "unknown", "none",
+    "local", "domain", "dns", "group", "name",
+}
+_NUMERIC_RE = re.compile(r'^\d+$')
+
+
+def _clean_domain_list(names) -> List[str]:
+    """Drop parser noise (stop-words, too short, numeric-only) from domain list."""
+    out: List[str] = []
+    for raw in names or []:
+        if not raw:
+            continue
+        tok = str(raw).strip()
+        if len(tok) < 2:
+            continue
+        if tok.lower() in _DOMAIN_STOPWORDS:
+            continue
+        if _NUMERIC_RE.match(tok):
+            continue
+        if tok not in out:
+            out.append(tok)
+    return out
 
 # Port → human-readable service label
 _PORT_LABELS = {
@@ -46,6 +73,8 @@ _PORT_LABELS = {
     3268:  "LDAP-GC",
     3306:  "MySQL",
     3389:  "RDP",
+    3000:  "HTTP-Dev",
+    5000:  "HTTP-Dev",
     5432:  "PostgreSQL",
     5900:  "VNC",
     5985:  "WinRM",
@@ -53,7 +82,9 @@ _PORT_LABELS = {
     6379:  "Redis",
     8000:  "HTTP-8000",
     8080:  "HTTP-Alt",
+    8081:  "HTTP-Alt",
     8443:  "HTTPS-Alt",
+    8888:  "HTTP-Alt",
     9200:  "Elasticsearch",
     10000: "Webmin",
     11211: "Memcached",
@@ -335,10 +366,11 @@ class Recommender:
                 f"[bold {colour}]{_esc(self.info.os_guess)}[/bold {colour}]"
             )
 
-        if self.info.domains_found:
+        clean_domains = _clean_domain_list(self.info.domains_found)
+        if clean_domains:
             self.console.print(
                 f"  [bold]🌐 Domains[/bold]  : "
-                f"{_esc(', '.join(self.info.domains_found))}"
+                f"{_esc(', '.join(clean_domains))}"
             )
 
         if self.info.shares_found:
@@ -393,6 +425,13 @@ class Recommender:
                 label = "HTTPS"
             else:
                 label = _PORT_LABELS.get(port, "")
+            if not label:
+                svc_name = (details.get("service") or "").strip()
+                # Filter generic nmap placeholders that would render as noise
+                if svc_name and svc_name.lower() not in {"unknown", "tcpwrapped", "port"}:
+                    label = svc_name.replace("-", " ").title().replace(" ", "-")
+                else:
+                    label = f"Port {port}"
             hints = _SUGGESTIONS.get(label, [])
             if hints:
                 self.console.print(

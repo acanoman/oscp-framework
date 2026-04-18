@@ -101,9 +101,6 @@ def run(target: str, session, dry_run: bool = False) -> None:
         if session.info.domain:
             cmd += ["--domain", session.info.domain]
 
-        display = " ".join(str(c) for c in cmd)
-        console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
-
         cms: Optional[str] = None
         try:
             run_wrapper(cmd, session, label=f"web_enum.sh port {port}", dry_run=dry_run)
@@ -822,8 +819,6 @@ def _run_cms_scanner(
         )
         return
 
-    display = " ".join(str(c) for c in cmd)
-    console.print(f"  [bold yellow][CMD][/bold yellow] {display}")
     log.info("CMS router: %s on port %d → %s", cms, port, tool)
 
     if dry_run:

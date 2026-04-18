@@ -953,10 +953,10 @@ hint "Burp Suite — manual proxy testing:
 # hints for confirmed hits.  Also promotes sensitive 200-OK paths to
 # CRITICAL via a fallback regex pass.
 #
-# Output: ${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt
+# Output: ${WEB_DIR}/cms_fingerprint_${PORT}.txt
 # ===========================================================================
 cms_fingerprint() {
-    local cms_out="${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt"
+    local cms_out="${WEB_DIR}/cms_fingerprint_${PORT}.txt"
     : > "$cms_out"
     info "[CMS-FP] Deep CMS fingerprinting (CVE matching + sensitive-path fallback)"
 
@@ -1182,7 +1182,7 @@ echo -e "  ${BOLD}============================================================${
 [[ -s "$SSLSCAN_OUT" ]]         && echo "  [+] SSLscan    : ${SSLSCAN_OUT}"   || true
 [[ -s "$NIKTO_OUT" ]]           && echo "  [+] Nikto      : ${NIKTO_OUT}"     || true
 [[ -n "$CMS_DETECTED" ]]        && echo "  [!] CMS        : ${CMS_DETECTED}"  || true
-[[ -s "${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt" ]] && echo "  [!] CMS-FP     : ${OUTPUT_DIR}/cms_fingerprint_${PORT}.txt" || true
+[[ -s "${WEB_DIR}/cms_fingerprint_${PORT}.txt" ]] && echo "  [!] CMS-FP     : ${WEB_DIR}/cms_fingerprint_${PORT}.txt" || true
 echo ""
 ok "Web enumeration complete."
 echo ""
