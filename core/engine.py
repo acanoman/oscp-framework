@@ -22,6 +22,7 @@ import re
 import subprocess
 import platform
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -49,6 +50,29 @@ _ANSI_RE = re.compile(r'\x1b(?:\[[0-9;]*[A-Za-z]|\([A-Za-z])')
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+# ---------------------------------------------------------------------------
+# CVE sanity check — NSE vuln scripts occasionally emit bogus/future CVE IDs
+# (e.g. CVE-2026-35414 mid-April 2026). Filter them out before they pollute
+# the attack path. Sequence threshold of 30000 is a holdover buffer against
+# impossibly-high in-year IDs; MITRE assigns ~35-40k/year roughly linearly.
+# ---------------------------------------------------------------------------
+
+_CVE_ID_RE = re.compile(r'^CVE-(\d{4})-(\d+)$', re.IGNORECASE)
+
+
+def _is_sane_cve(cve_id: str, current_year: int) -> bool:
+    m = _CVE_ID_RE.match(cve_id.strip())
+    if not m:
+        return False
+    year = int(m.group(1))
+    seq  = int(m.group(2))
+    if year > current_year:
+        return False
+    if year == current_year and seq > 30000:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -865,11 +889,16 @@ class Engine:
         # ── Parse port ↔ CVE associations ──────────────────────────────────
         # Walk the file linearly; `current_port` tracks the most recent
         # "<N>/tcp open" header.  CVE lines that appear before any port header
-        # are filed under 'unknown'.
+        # are filed under 'unknown'. Each CVE ID passes a sanity check
+        # (year <= current year, sequence plausible) before bucketing — NSE
+        # vulners occasionally emits IDs from the future.
         port_cves: Dict[str, List[str]] = {}
         current_port = "unknown"
         _port_re = re.compile(r'^\s*(\d+)/tcp\s+open\b')
         _cve_re  = re.compile(r'CVE-\d{4}-\d+')
+
+        current_year = datetime.now().year
+        discarded_cves: set = set()
 
         for line in content.splitlines():
             pm = _port_re.match(line)
@@ -877,6 +906,11 @@ class Engine:
                 current_port = pm.group(1)
                 continue
             for cve in _cve_re.findall(line):
+                if not _is_sane_cve(cve, current_year):
+                    if cve not in discarded_cves:
+                        self.log.warning("CVE sanity: discarded bogus %s", cve)
+                        discarded_cves.add(cve)
+                    continue
                 bucket = port_cves.setdefault(current_port, [])
                 if cve not in bucket:
                     bucket.append(cve)
@@ -889,7 +923,10 @@ class Engine:
                 self.session.add_note(pipe_note)
 
         # ── Legible aggregate note (backward-compatible) ───────────────────
-        cves = sorted(set(re.findall(r'CVE-\d{4}-\d+', content)))
+        cves = sorted({
+            c for c in re.findall(r'CVE-\d{4}-\d+', content)
+            if _is_sane_cve(c, current_year)
+        })
         if cves:
             self.session.add_note(f"CRITICAL: NSE vuln scan CVEs found: {cves[:15]}")
             warn(f"NSE vuln scan — CVEs found: {', '.join(cves[:10])}")

@@ -419,7 +419,12 @@ class Recommender:
 
             # Known CVEs sub-block (from cve_database — pre-sorted by severity,
             # capped at 5 per port; critical entries preserved by the sort).
-            known_cves = match_by_port(port)[:5]
+            # Pass service+version so the DB filters by banner, not just port.
+            known_cves = match_by_port(
+                port,
+                service=details.get("service", ""),
+                version=details.get("version", ""),
+            )[:5]
             if known_cves:
                 if not hints:
                     header_label = label or "port"

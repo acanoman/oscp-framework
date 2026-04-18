@@ -27,16 +27,20 @@ Field schema per entry:
     references      list[str] — URLs to advisories / PoCs
 
 Public helpers:
-    match_by_port(port)                           -> list[entry]   (pre-sorted by severity)
-    match_by_version(service, version)            -> list[entry]
-    match_by_nmap_script(script_name, output)     -> list[entry]
-    format_cve_for_attack_path(cve, ip, port)     -> (title, body, refs_line)
+    match_by_port(port, service=None, version=None) -> list[entry]   (pre-sorted by severity)
+    match_by_version(service, version)              -> list[entry]
+    match_by_nmap_script(script_name, output)       -> list[entry]
+    format_cve_for_attack_path(cve, ip, port)       -> (title, body, refs_line)
 
 Design notes:
     * Port→CVE index is built once at import time and stored pre-sorted by
       severity — consumers can truncate without losing criticals.
     * Local-privesc CVEs (DirtyCow, PwnKit, ...) have port=None and are
       intentionally absent from _CVE_BY_PORT; they need post-foothold context.
+    * `match_by_port` requires port AND (service_keyword AND/OR version_regex)
+      to match. Port-only fallback applies only when both detectors are None
+      (generic CVEs: Zerologon, PrintNightmare, etc.). Prevents cross-service
+      false positives (e.g. HFS Rejetto on nginx:8081, EternalBlue on Samba).
     * `match_by_nmap_script` is gated on VULNERABLE/CVE tokens in NSE output to
       avoid false positives from mere script execution.
     * Version regexes are CONSERVATIVE — prefer false negatives over false
@@ -990,15 +994,68 @@ _build_indexes()
 # Public API                                                                  #
 # --------------------------------------------------------------------------- #
 
-def match_by_port(port: Optional[int]) -> List[Dict[str, Any]]:
-    """Return CVEs whose detection.port matches, pre-sorted by severity."""
+def match_by_port(
+    port: Optional[int],
+    service: Optional[str] = None,
+    version: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return CVEs whose detection.port matches AND whose service_keyword /
+    version_regex also match the detected banner — pre-sorted by severity.
+
+    Matching rules (per candidate CVE from the port bucket):
+        * Both service_keyword and version_regex are None → allow (generic CVE,
+          e.g. Zerologon, PrintNightmare — cannot distinguish by banner).
+        * Both defined → BOTH must match (keyword AND regex). Prevents FPs like
+          SambaCry (service=samba, regex=3.5-4.6) hitting modern Samba 4.9.
+        * Only one defined → that one must match.
+        * At least one defined but none match → discard.
+
+    When `service`/`version` are not supplied (legacy callers), behavior
+    degrades to port-only fallback: only generic CVEs (both detectors None)
+    are returned. This is intentional — prefer silence over cross-service FPs.
+    """
     if port is None:
         return []
     try:
         p = int(port)
     except (TypeError, ValueError):
         return []
-    return list(_CVE_BY_PORT.get(p, ()))
+    bucket = _CVE_BY_PORT.get(p, ())
+    if not bucket:
+        return []
+
+    haystack = f"{service or ''} {version or ''}".strip()
+
+    out: List[Dict[str, Any]] = []
+    for cve in bucket:
+        det = cve.get("detection") or {}
+        kw  = det.get("service_keyword")
+        rgx = det.get("version_regex")
+
+        kw_match = False
+        if kw:
+            kw_match = kw.lower() in haystack.lower()
+
+        rgx_match = False
+        if rgx:
+            try:
+                rgx_match = bool(re.search(rgx, haystack, re.IGNORECASE))
+            except re.error:
+                rgx_match = False
+
+        if kw is None and rgx is None:
+            allow = True
+        elif kw is not None and rgx is not None:
+            allow = kw_match and rgx_match
+        elif kw is not None:
+            allow = kw_match
+        else:
+            allow = rgx_match
+
+        if allow:
+            out.append(cve)
+
+    return out
 
 
 def match_by_version(service: str, version: str) -> List[Dict[str, Any]]:
