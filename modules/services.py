@@ -26,10 +26,13 @@ _SERVICE_PORTS = {
     110,   # POP3
     143,   # IMAP
     161,   # SNMP (UDP — checked separately)
+    631,   # CUPS / IPP
     993,   # IMAPS
     995,   # POP3S
+    1099,  # Java RMI Registry (default)
     1433,  # MSSQL
     2049,  # NFS
+    2181,  # ZooKeeper
     3306,  # MySQL
     3389,  # RDP
     5432,  # PostgreSQL
@@ -38,6 +41,10 @@ _SERVICE_PORTS = {
     6379,  # Redis
     27017, # MongoDB
 }
+
+# Service-name substrings that identify a Java RMI endpoint on any port
+# (default 1099 plus non-standard high ports like 46295 seen in the wild).
+_RMI_SERVICE_KEYWORDS = ("rmi", "rmiregistry", "java-rmi")
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +55,22 @@ def run(target: str, session, dry_run: bool = False) -> None:
     log = session.log
     log.info("Services module starting for %s", target)
 
-    # Collect relevant TCP ports
-    tcp_ports = session.info.open_ports & _SERVICE_PORTS
+    # Detect Java RMI on any port (default 1099 + high-port variants like
+    # 46295) by inspecting Nmap's service label. The wrapper then iterates
+    # all matching ports instead of hard-coding 1099.
+    rmi_ports = sorted({
+        p for p in session.info.open_ports
+        if any(
+            kw in (session.info.port_details.get(p, {}).get("service", "") or "").lower()
+            for kw in _RMI_SERVICE_KEYWORDS
+        )
+    })
+    if rmi_ports:
+        log.info("RMI ports detected by service name: %s", rmi_ports)
+
+    # Collect relevant TCP ports — union of fixed service ports and any
+    # dynamically-detected RMI ports (so high-port RMI reaches the wrapper).
+    tcp_ports = (session.info.open_ports & _SERVICE_PORTS) | set(rmi_ports)
     if not tcp_ports:
         log.info("No service-specific ports open — skipping services module.")
         return
@@ -80,6 +101,9 @@ def run(target: str, session, dry_run: bool = False) -> None:
     if udp_ports_csv:
         cmd += ["--udp-ports", udp_ports_csv]
         log.info("UDP ports passed to wrapper: %s", udp_ports_csv)
+
+    if rmi_ports:
+        cmd += ["--rmi-ports", ",".join(str(p) for p in rmi_ports)]
 
     if session.info.domain:
         cmd += ["--domain", session.info.domain]

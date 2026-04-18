@@ -724,6 +724,85 @@ fi
 echo ""
 
 # ===========================================================================
+# 7.5 — Loot-hunt pass
+#
+# Hunts backup / dump / config files (bak, old, zip, sql, tar.gz, txt, git,
+# env, conf) against every 200/301-discovered directory — not just /.
+# Reads paths from gobuster and feroxbuster output (same pattern as the CGI
+# sniper in step 5) so dirs like /uploads/, /admin/, /backup/ also get
+# probed for *.bak / *.zip / config.*.
+#
+# Wordlist: common.txt — compact; strength of this pass comes from the
+# extension list, not path breadth. Runtime ~3-5 min per discovered dir
+# (with -t 50), kept manageable by the small wordlist.
+# ===========================================================================
+info "[7.5/10] Loot-hunt — backup/config extensions across discovered paths"
+
+LOOT_OUT="${WEB_DIR}/feroxbuster_loot${SUFFIX}.txt"
+> "$LOOT_OUT"
+
+LOOT_EXTS="bak,old,zip,sql,tar.gz,txt,git,env,conf"
+
+if [[ "$WEB_404_ONLY" == "true" ]]; then
+    warn "[SKIP] Loot-hunt skipped — server returns 404 for all paths."
+    touch "$LOOT_OUT"
+elif ! command -v feroxbuster &>/dev/null; then
+    warn "feroxbuster not installed — skipping loot-hunt."
+    touch "$LOOT_OUT"
+elif [[ -z "$WL_QUICK" ]]; then
+    warn "No common wordlist — skipping loot-hunt."
+    touch "$LOOT_OUT"
+else
+    # Collect unique 200/301 directory paths from earlier scans (same
+    # extraction approach used by the CGI sniper block).
+    {
+        if [[ -s "$GB_QUICK_OUT" ]]; then
+            grep -E '\(Status: (200|301)\)' "$GB_QUICK_OUT" 2>/dev/null \
+                | grep -oP '^/[^\s(]+/' || true
+        fi
+        if [[ -s "$FEROX_OUT" ]]; then
+            grep -oP 'https?://\S+/' "$FEROX_OUT" 2>/dev/null \
+                | sed "s|${BASE_URL}||g" \
+                | grep -oP '^/\S*' || true
+        fi
+        echo "/"   # always scan root
+    } | sort -u | grep -v '^$' > "${WEB_DIR}/.loot_dirs${SUFFIX}.tmp"
+
+    LOOT_DIR_COUNT=$(wc -l < "${WEB_DIR}/.loot_dirs${SUFFIX}.tmp" || echo 0)
+    ok "Loot-hunt targets: ${WHITE}${LOOT_DIR_COUNT}${NC} directories"
+
+    LOOT_SIZE_FILTER=""
+    [[ -n "$WEB_SOFT_404_SIZE" ]] && LOOT_SIZE_FILTER="--filter-size ${WEB_SOFT_404_SIZE}"
+
+    while IFS= read -r dir_path; do
+        [[ -z "$dir_path" ]] && continue
+        DIR_URL="${BASE_URL}${dir_path}"
+        info "  Loot-hunt: ${WHITE}${DIR_URL}${NC}"
+        cmd "feroxbuster -u ${DIR_URL} -w ${WL_QUICK} -x ${LOOT_EXTS} -t 50 -k -q -d 1 --status-codes 200 ${LOOT_SIZE_FILTER}"
+        # shellcheck disable=SC2086
+        feroxbuster \
+            -u "$DIR_URL" \
+            -w "$WL_QUICK" \
+            -x "$LOOT_EXTS" \
+            -t 50 -k -q -d 1 \
+            --status-codes 200 \
+            --no-state \
+            $LOOT_SIZE_FILTER \
+            2>/dev/null | tee -a "$LOOT_OUT" || true
+    done < "${WEB_DIR}/.loot_dirs${SUFFIX}.tmp"
+
+    rm -f "${WEB_DIR}/.loot_dirs${SUFFIX}.tmp"
+
+    LOOT_HITS=$(grep -cE '^200\b' "$LOOT_OUT" 2>/dev/null || echo 0)
+    if [[ "$LOOT_HITS" -gt 0 ]]; then
+        ok "Loot-hunt: ${RED}${LOOT_HITS}${NC} candidate file(s) found → ${WHITE}${LOOT_OUT}${NC}"
+    else
+        ok "Loot-hunt done → ${WHITE}${LOOT_OUT}${NC} (no loot extensions found)"
+    fi
+fi
+echo ""
+
+# ===========================================================================
 # 7 — Virtual host fuzzing
 # Runs if --domain was passed OR if a hostname was auto-detected from
 # TLS SANs / HTTP redirects (both stored in discovered_hostnames.txt)
@@ -1096,6 +1175,7 @@ echo -e "  ${BOLD}============================================================${
 [[ -s "$WHATWEB_OUT" ]]          && echo "  [+] WhatWeb    : ${WHATWEB_OUT}"   || true
 [[ -s "$GB_QUICK_OUT" ]]        && echo "  [+] Gobuster   : ${GB_QUICK_OUT}"  || true
 [[ -s "$FEROX_OUT" ]]           && echo "  [+] Feroxbuster: ${FEROX_OUT}"     || true
+[[ -s "$LOOT_OUT" ]]            && echo "  [+] Loot-hunt  : ${LOOT_OUT}"      || true
 [[ -s "$CGI_SNIPER_OUT" ]]      && echo "  [!] CGI Sniper : ${CGI_SNIPER_OUT}" || true
 [[ -s "$FFUF_VHOST_OUT" ]]      && echo "  [!] VHost(ffuf): ${FFUF_VHOST_OUT}" || true
 [[ -s "$GOBUSTER_VHOST_OUT" ]]  && echo "  [+] VHost(gb)  : ${GOBUSTER_VHOST_OUT}" || true

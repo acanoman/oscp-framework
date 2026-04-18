@@ -236,6 +236,7 @@ _PORT_FALLBACK_MAP: Dict[int, str] = {
     995:   "mail",
     1099:  "services",   # Java RMI
     1433:  "databases",
+    2181:  "services",   # ZooKeeper
     3306:  "databases",
     3389:  "remote",
     5432:  "databases",
