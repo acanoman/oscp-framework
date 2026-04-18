@@ -126,16 +126,55 @@ def run_wrapper(
     # the next [CMD] (or EOF / [*] step header) must close it with a separator.
     _cmd_state = {"active": True}  # wrapper itself opened a box on launch
 
+    # Suggestion buffer — accumulates [MANUAL]/[SUGGESTED] header + every
+    # indented marker-less continuation line that follows, so a multi-line
+    # bash `hint "..."` heredoc renders as one [SUGGESTED] block.
+    _sug_buffer: list = []
+
     def _close_cmd_box_if_open() -> None:
         if _cmd_state["active"]:
             cmd_output_end()
             _cmd_state["active"] = False
+
+    def _flush_suggestions() -> None:
+        # Fix #3: drop empty strings so a bare [MANUAL] never prints an
+        # empty yellow header.
+        cmds = [s for s in _sug_buffer if s.strip()]
+        _sug_buffer.clear()
+        if cmds:
+            cmd_suggested(cmds)
 
     def _display_line(line: str) -> None:
         from rich.markup import escape as _esc
         # Strip ANSI escape codes (e.g. ssh-audit colour output)
         clean    = _ANSI_RE.sub('', line)
         stripped = clean.lstrip()
+        has_indent = clean != stripped  # leading whitespace present?
+
+        # ── Multi-line [SUGGESTED] buffering ──────────────────────────
+        # Rule:
+        #   * [MANUAL]/[SUGGESTED] marker  → start/append to buffer.
+        #   * Indented, marker-less line while buffer open → continuation.
+        #   * Anything else → flush buffer first, then handle normally.
+        if stripped.startswith("[MANUAL]"):
+            _close_cmd_box_if_open()
+            content = stripped[8:].strip()
+            if content:
+                _sug_buffer.append(content)
+            return
+        if stripped.startswith("[SUGGESTED]"):
+            _close_cmd_box_if_open()
+            content = stripped[11:].strip()
+            if content:
+                _sug_buffer.append(content)
+            return
+        if _sug_buffer and has_indent and not stripped.startswith("["):
+            # Indented continuation of the current hint block
+            if stripped:
+                _sug_buffer.append(stripped)
+            return
+        # Any other line ends the suggestion block
+        _flush_suggestions()
 
         if stripped.startswith("[+]"):
             success(stripped[3:].strip())
@@ -160,14 +199,6 @@ def run_wrapper(
             _close_cmd_box_if_open()
             cmd_executed(stripped[5:].strip())
             _cmd_state["active"] = True
-        elif stripped.startswith("[MANUAL]"):
-            # Operator-run suggestion — render as [SUGGESTED] block, not as
-            # a [CMD EXECUTED] box. Close any open cmd box first.
-            _close_cmd_box_if_open()
-            cmd_suggested(stripped[8:].strip())
-        elif stripped.startswith("[SUGGESTED]"):
-            _close_cmd_box_if_open()
-            cmd_suggested(stripped[11:].strip())
         elif stripped.startswith("[SKIP]"):
             console.print(f"  [dim][SKIP][/dim] {_esc(stripped[6:].strip())}")
         elif stripped.startswith("[✓]"):
@@ -220,8 +251,10 @@ def run_wrapper(
             while not _stdout_done:
                 try:
                     for raw_line in proc.stdout:  # type: ignore[union-attr]
-                        line = raw_line.strip()
-                        if line:
+                        # Preserve leading whitespace so multi-line [MANUAL]
+                        # continuations (indented, marker-less) can be detected.
+                        line = raw_line.rstrip("\r\n")
+                        if line.strip():
                             _display_line(line)
                     _stdout_done = True  # EOF reached — wrapper finished normally
                 except KeyboardInterrupt:
@@ -254,7 +287,9 @@ def run_wrapper(
         finally:
             if timer is not None:
                 timer.cancel()
-            # Close any [CMD EXECUTED] box still open when the wrapper ends
+            # Flush any pending [SUGGESTED] block and close the box still
+            # open when the wrapper ends.
+            _flush_suggestions()
             _close_cmd_box_if_open()
 
         if _timed_out:
@@ -267,10 +302,12 @@ def run_wrapper(
             log.warning("%s exited with code %d", label or cmd[0], rc)
         return 0 if rc == 130 else rc
     except KeyboardInterrupt:
+        _flush_suggestions()
         _close_cmd_box_if_open()
         _kill_proc_group(proc, log)
         raise
     except FileNotFoundError:
+        _flush_suggestions()
         _close_cmd_box_if_open()
         error(f"Command not found: {cmd[0]}")
         log.error("Command not found: %s", cmd[0])
