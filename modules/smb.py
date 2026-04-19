@@ -339,6 +339,8 @@ def _parse_signing(smb_dir: Path, session, log) -> None:
 
 def _parse_smbv1(smb_dir: Path, session, log) -> None:
     """Detect SMBv1 enabled — EternalBlue / WannaCry attack surface."""
+    ip = session.info.ip
+    smbv1_hit = False
     for fname in ("nxc_shares.txt", "nmap_smb.txt", "enum4linux.txt"):
         f = smb_dir / fname
         if not f.exists():
@@ -350,14 +352,36 @@ def _parse_smbv1(smb_dir: Path, session, log) -> None:
         if re.search(r'SMBv1[:\s(]+True|smb-vuln-ms17-010|EternalBlue|NT LM 0\.12', content, re.IGNORECASE):
             log.warning(
                 "SMBv1 ENABLED on %s — potential EternalBlue (MS17-010) target. "
-                "Verify manually: nmap -p 445 --script smb-vuln-ms17-010 %s",
-                session.info.ip, session.info.ip,
+                "Verify with: nxc smb %s -u '' -p '' -M ms17-010",
+                ip, ip,
             )
             session.add_note(
-                f"HIGH: SMBv1 enabled — check EternalBlue: "
-                f"nmap -p 445 --script smb-vuln-ms17-010 {session.info.ip}"
+                f"HIGH: SMBv1 enabled — verify MS17-010 family: "
+                f"nxc smb {ip} -u '' -p '' -M ms17-010  |  "
+                f"nmap -p 445 --script smb-vuln-ms17-010 {ip}"
             )
+            smbv1_hit = True
             break
+
+    # Parse the active NXC MS17-010 probe result (written by wrappers/smb_enum.sh [6e/7])
+    ms17_file = smb_dir / "nxc_ms17010.txt"
+    if ms17_file.exists():
+        ms17_content = ms17_file.read_text(errors="ignore")
+        if re.search(r'VULNERABLE|is vulnerable to ms17-010', ms17_content, re.IGNORECASE):
+            log.warning(
+                "MS17-010 VULNERABLE on %s — EternalBlue / EternalRomance / "
+                "EternalSynergy / EternalChampion attack surface confirmed.",
+                ip,
+            )
+            session.add_note(
+                f"CRITICAL: MS17-010 confirmed vulnerable on {ip} — exploit paths:\n"
+                f"  python3 42315.py {ip}   # EternalBlue standalone PoC (searchsploit -m 42315)\n"
+                f"  [MSF-RESTRICTED] use exploit/windows/smb/ms17_010_eternalblue  # Win7/2008R2\n"
+                f"  [MSF-RESTRICTED] use exploit/windows/smb/ms17_010_psexec       # Win8.1/2012R2 (EternalRomance/Synergy/Champion)\n"
+                f"  [MSF-RESTRICTED] use exploit/windows/smb/ms17_010_command      # no-payload cmd exec variant"
+            )
+        elif smbv1_hit and re.search(r'could not be (exploited|detected)|NOT VULNERABLE|safe', ms17_content, re.IGNORECASE):
+            log.info("MS17-010 probe ran but target appears patched (SMBv1 still enabled).")
 
 
 def _parse_samba_version(smb_dir: Path, session, log) -> None:
