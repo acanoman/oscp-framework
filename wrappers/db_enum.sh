@@ -35,13 +35,18 @@ has_port() { echo ",$PORTS," | grep -q ",$1,"; }
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-TARGET=""; OUTPUT_DIR=""; PORTS=""
+TARGET=""; OUTPUT_DIR=""; PORTS=""; DB_USER=""; DB_PASS=""; DB_HASH=""; DOMAIN=""; LOCAL_AUTH=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --target)     TARGET="$2";     shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --ports)      PORTS="$2";      shift 2 ;;
+        --user)       DB_USER="$2";    shift 2 ;;
+        --pass)       DB_PASS="$2";    shift 2 ;;
+        --hash)       DB_HASH="$2";    shift 2 ;;
+        --domain)     DOMAIN="$2";     shift 2 ;;
+        --local-auth) LOCAL_AUTH=1;    shift ;;
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -53,6 +58,13 @@ fi
 
 DB_DIR="${OUTPUT_DIR}/db"
 mkdir -p "$DB_DIR"
+
+# Detect preferred credential-sweep tool (nxc > netexec > crackmapexec).
+# Only used by the authenticated section at the end of this wrapper.
+NXC=""
+command -v nxc          &>/dev/null && NXC="nxc"
+command -v netexec      &>/dev/null && [[ -z "$NXC" ]] && NXC="netexec"
+command -v crackmapexec &>/dev/null && [[ -z "$NXC" ]] && NXC="crackmapexec"
 
 echo ""
 echo -e "  ${BOLD}============================================================${NC}"
@@ -473,6 +485,52 @@ if echo "$PORTS" | grep -qw "11211"; then
     else
         info "Memcached not responding or port closed."
     fi
+fi
+
+# ===========================================================================
+# Authenticated database enumeration — READ-ONLY (only with credentials)
+#
+#   Lists databases / users with the supplied credential. No writes, no
+#   xp_cmdshell, no INTO OUTFILE — those stay MANUAL (exploitation). Databases
+#   do not enforce Windows account lockout, and we make a single attempt each.
+# ===========================================================================
+if [[ -n "$DB_USER" && ( -n "$DB_PASS" || -n "$DB_HASH" ) ]]; then
+    info "[AUTH] Authenticated database enumeration as ${DB_USER} (read-only)"
+    DB_SECRET="$DB_PASS"; [[ -z "$DB_SECRET" ]] && DB_SECRET="$DB_HASH"
+
+    # -- MSSQL (1433) via nxc — list databases, no command execution --
+    if has_port 1433 && [[ -n "$NXC" ]]; then
+        NXC_CRED=( -u "$DB_USER" )
+        if [[ -n "$DB_PASS" ]]; then NXC_CRED+=( -p "$DB_PASS" ); else NXC_CRED+=( -H "$DB_HASH" ); fi
+        [[ "$LOCAL_AUTH" == "1" ]] && NXC_CRED+=( --local-auth )
+        [[ "$LOCAL_AUTH" != "1" && -n "$DOMAIN" ]] && NXC_CRED+=( -d "$DOMAIN" )
+
+        cmd "$NXC mssql $TARGET ${NXC_CRED[*]} -q 'SELECT name FROM master.dbo.sysdatabases'"
+        $NXC mssql "$TARGET" "${NXC_CRED[@]}" \
+            -q "SELECT name FROM master.dbo.sysdatabases" \
+            2>&1 | tee "${DB_DIR}/mssql_auth.txt" || true
+        grep -qi 'Pwn3d\|(admin)' "${DB_DIR}/mssql_auth.txt" 2>/dev/null && \
+            warn "MSSQL: this account looks privileged — xp_cmdshell may be available (MANUAL, confirm scope)"
+    elif has_port 1433; then
+        skip "nxc (MSSQL auth enum)"
+    fi
+
+    # -- MySQL (3306) — SHOW DATABASES + user table (password auth only) --
+    if has_port 3306 && [[ -n "$DB_PASS" ]] && command -v mysql &>/dev/null; then
+        cmd "mysql -h $TARGET -u $DB_USER -p<secret> -e 'SHOW DATABASES; SELECT user,host FROM mysql.user;'"
+        mysql -h "$TARGET" -u "$DB_USER" -p"$DB_PASS" \
+            -e "SHOW DATABASES; SELECT user,host FROM mysql.user;" \
+            2>&1 | tee "${DB_DIR}/mysql_auth.txt" || true
+    fi
+
+    # -- PostgreSQL (5432) — list databases and roles (password auth only) --
+    if has_port 5432 && [[ -n "$DB_PASS" ]] && command -v psql &>/dev/null; then
+        cmd "PGPASSWORD=<secret> psql -h $TARGET -U $DB_USER -c '\\l' -c '\\du'"
+        PGPASSWORD="$DB_PASS" psql -h "$TARGET" -U "$DB_USER" -w \
+            -c '\l' -c '\du' \
+            2>&1 | tee "${DB_DIR}/pgsql_auth.txt" || true
+    fi
+    echo ""
 fi
 
 ok "Database enumeration complete — output: ${DB_DIR}/"

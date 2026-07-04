@@ -30,7 +30,7 @@ skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1 not installed — skipping."; }
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-TARGET=""; OUTPUT_DIR=""; SMB_USER=""; SMB_PASS=""; DOMAIN=""
+TARGET=""; OUTPUT_DIR=""; SMB_USER=""; SMB_PASS=""; SMB_HASH=""; DOMAIN=""; LOCAL_AUTH=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +38,8 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --user)       SMB_USER="$2";   shift 2 ;;
         --pass)       SMB_PASS="$2";   shift 2 ;;
+        --hash)       SMB_HASH="$2";   shift 2 ;;
+        --local-auth) LOCAL_AUTH=1;    shift ;;
         --domain)     DOMAIN="$2";     shift 2 ;;
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
@@ -389,37 +391,60 @@ fi
 # ===========================================================================
 # 7 — Authenticated enumeration (only if credentials provided)
 # ===========================================================================
-if [[ -n "$SMB_USER" && -n "$SMB_PASS" ]]; then
-    info "[7/7] Authenticated SMB enumeration (${SMB_USER})"
+if [[ -n "$SMB_USER" && ( -n "$SMB_PASS" || -n "$SMB_HASH" ) ]]; then
+    AUTH_KIND="password"; [[ -n "$SMB_HASH" ]] && AUTH_KIND="NTLM hash (pass-the-hash)"
+    info "[7/7] Authenticated SMB enumeration (${SMB_USER} via ${AUTH_KIND})"
+    warn "Single authenticated bind as one known user — no spraying, no lockout risk."
 
-    # smbmap authenticated
-    SMBMAP_AUTH="${SMB_DIR}/smbmap_auth.txt"
-    cmd "smbmap -H $TARGET -u '$SMB_USER' -p '$SMB_PASS' --no-banner"
-    smbmap -H "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" --no-banner \
-        2>&1 | tee "$SMBMAP_AUTH" || true
-
-    # nxc authenticated
-    if [[ -n "$NXC" ]]; then
-        cmd "$NXC smb $TARGET -u '$SMB_USER' -p '$SMB_PASS' --shares"
-        $NXC smb "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" --shares \
-            2>&1 | tee "${SMB_DIR}/nxc_auth_shares.txt" || true
-
-        cmd "$NXC smb $TARGET -u '$SMB_USER' -p '$SMB_PASS' --users"
-        $NXC smb "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" --users \
-            2>&1 | tee "${SMB_DIR}/nxc_auth_users.txt" || true
-
-        cmd "$NXC smb $TARGET -u '$SMB_USER' -p '$SMB_PASS' --groups"
-        $NXC smb "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" --groups \
-            2>&1 | tee "${SMB_DIR}/nxc_auth_groups.txt" || true
-
-        cmd "$NXC smb $TARGET -u '$SMB_USER' -p '$SMB_PASS' --loggedon-users"
-        $NXC smb "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" --loggedon-users \
-            2>&1 | tee "${SMB_DIR}/nxc_auth_loggedon.txt" || true
+    # ------------------------------------------------------------------
+    # Build credential argument arrays once. -p carries the password OR,
+    # in pass-the-hash mode, the NTLM hash (nxc/smbmap both accept -H/-p).
+    # ------------------------------------------------------------------
+    NXC_CRED=( -u "$SMB_USER" )
+    SMBMAP_CRED=( -u "$SMB_USER" )
+    if [[ -n "$SMB_PASS" ]]; then
+        NXC_CRED+=( -p "$SMB_PASS" );      SMBMAP_CRED+=( -p "$SMB_PASS" )
+    else
+        NXC_CRED+=( -H "$SMB_HASH" );      SMBMAP_CRED+=( -p ":$SMB_HASH" )
+    fi
+    if [[ "$LOCAL_AUTH" == "1" ]]; then
+        NXC_CRED+=( --local-auth )
+    elif [[ -n "$DOMAIN" ]]; then
+        NXC_CRED+=( -d "$DOMAIN" );        SMBMAP_CRED+=( -d "$DOMAIN" )
     fi
 
-    # enum4linux-ng authenticated
-    if command -v enum4linux-ng &>/dev/null; then
-        cmd "enum4linux-ng -A $TARGET -u '$SMB_USER' -p '$SMB_PASS'"
+    # smbmap authenticated (share access map)
+    SMBMAP_AUTH="${SMB_DIR}/smbmap_auth.txt"
+    cmd "smbmap -H $TARGET ${SMBMAP_CRED[*]} --no-banner"
+    smbmap -H "$TARGET" "${SMBMAP_CRED[@]}" --no-banner \
+        2>&1 | tee "$SMBMAP_AUTH" || true
+
+    # nxc authenticated — shares, users, groups, logged-on sessions
+    if [[ -n "$NXC" ]]; then
+        cmd "$NXC smb $TARGET ${NXC_CRED[*]} --shares"
+        $NXC smb "$TARGET" "${NXC_CRED[@]}" --shares \
+            2>&1 | tee "${SMB_DIR}/nxc_auth_shares.txt" || true
+
+        cmd "$NXC smb $TARGET ${NXC_CRED[*]} --users"
+        $NXC smb "$TARGET" "${NXC_CRED[@]}" --users \
+            2>&1 | tee "${SMB_DIR}/nxc_auth_users.txt" || true
+
+        cmd "$NXC smb $TARGET ${NXC_CRED[*]} --groups"
+        $NXC smb "$TARGET" "${NXC_CRED[@]}" --groups \
+            2>&1 | tee "${SMB_DIR}/nxc_auth_groups.txt" || true
+
+        cmd "$NXC smb $TARGET ${NXC_CRED[*]} --loggedon-users"
+        $NXC smb "$TARGET" "${NXC_CRED[@]}" --loggedon-users \
+            2>&1 | tee "${SMB_DIR}/nxc_auth_loggedon.txt" || true
+
+        # Merge authenticated user list into the master users file
+        grep -oP '(?<=\\)\S+' "${SMB_DIR}/nxc_auth_users.txt" 2>/dev/null \
+            | sort -u >> "${SMB_DIR}/users_rpc.txt" 2>/dev/null || true
+    fi
+
+    # enum4linux-ng authenticated (password only — no PTH support in the tool)
+    if command -v enum4linux-ng &>/dev/null && [[ -n "$SMB_PASS" ]]; then
+        cmd "enum4linux-ng -A $TARGET -u '$SMB_USER' -p '<pass>'"
         enum4linux-ng -A "$TARGET" -u "$SMB_USER" -p "$SMB_PASS" \
             2>&1 | tee "${SMB_DIR}/enum4linux_auth.txt" || true
     fi

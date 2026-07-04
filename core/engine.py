@@ -297,6 +297,8 @@ def _svc_to_module(service: str) -> Optional[str]:
 
 # Map module name → Python module path  (imported lazily to avoid circular deps)
 MODULE_REGISTRY = {
+    # Tier 0 — authenticated credential sweep (only when -u/-p supplied)
+    "creds":     "modules.creds",
     # Tier 1
     "smb":       "modules.smb",
     "ftp":       "modules.ftp",
@@ -325,6 +327,8 @@ WRAPPERS_DIR = Path(__file__).resolve().parent.parent / "wrappers"
 # ---------------------------------------------------------------------------
 
 MODULE_TIERS: Dict[str, int] = {
+    # ── Tier 0 — Credential sweep (runs first when creds supplied) ────────
+    "creds":     0,
     # ── Tier 1 — Lightning Fast ──────────────────────────────────────────
     "smb":       1,
     "ftp":       1,
@@ -399,6 +403,10 @@ class Engine:
         lhost:          str         = "",
         resume:         bool        = False,
         quick:          bool        = False,
+        user:           str         = "",
+        password:       str         = "",
+        ntlm_hash:      str         = "",
+        local_auth:     bool        = False,
     ) -> None:
         self.target         = target
         self.domain         = domain
@@ -408,6 +416,10 @@ class Engine:
         self.lhost          = lhost
         self.resume         = resume
         self.quick          = quick
+        self.user           = user
+        self.password       = password
+        self.ntlm_hash      = ntlm_hash
+        self.local_auth     = local_auth
 
         # Timing — set at the start of _run_inner()
         self._run_start: float = 0.0
@@ -420,6 +432,15 @@ class Engine:
             lhost=lhost, resume=resume,
         )
         self.info: TargetInfo = self.session.info
+
+        # Seed credentials into session.info so every credential-aware module
+        # picks them up. Skip when --resume already restored them from disk
+        # and no new creds were supplied on the CLI.
+        if user:
+            self.info.cred_user  = user
+            self.info.cred_pass  = password
+            self.info.cred_hash  = ntlm_hash
+            self.info.local_auth = local_auth
         self.log        = self.session.log
         self.recommender = Recommender(self.info, self.log, self.console)
 
@@ -490,8 +511,13 @@ class Engine:
             self.session.finalize_notes()
             return
 
-        # Phase 3 — Run modules (Tier 1 → Tier 2 → Tier 3, strictly ordered)
+        # Phase 3 — Run modules (Tier 0 → Tier 1 → Tier 2 → Tier 3, strictly ordered)
         _TIER_RULES = {
+            0: (
+                "[bold magenta] TIER 0 — CREDENTIAL SWEEP "
+                "(authenticated — where does this cred work?) [/bold magenta]",
+                "magenta",
+            ),
             1: (
                 "[bold green] TIER 1 — LIGHTNING FAST "
                 "(smb · ftp · ldap · dns · snmp · nfs · services) [/bold green]",
@@ -1165,6 +1191,13 @@ class Engine:
                     raw.append(mod)
                     seen.add(mod)
 
+        # When a credential was supplied, always run the authenticated sweep
+        # first (Tier 0) so the operator immediately sees which services the
+        # cred unlocks — unless the user forced a module list that omits it.
+        if getattr(self.info, "cred_user", "") and "creds" not in raw:
+            if not self.forced_modules:
+                raw.insert(0, "creds")
+
         # Stable sort by tier — preserves relative order within each tier
         ordered = sorted(raw, key=lambda m: (MODULE_TIERS.get(m, _DEFAULT_TIER), raw.index(m)))
 
@@ -1461,6 +1494,14 @@ class Engine:
             info_lines.append(
                 f"  [bold white]LHOST  :[/bold white] [bold green]{self.lhost}[/bold green]"
                 "  [dim](Arsenal Recommender)[/dim]"
+            )
+        if self.user:
+            _secret = "hash" if self.ntlm_hash else "pass"
+            _scope  = "local" if self.local_auth else "domain"
+            info_lines.append(
+                f"  [bold white]Auth   :[/bold white] "
+                f"[bold green]{self.user}[/bold green] "
+                f"[dim]({_scope}, via {_secret} — AUTHENTICATED enum, no spraying)[/dim]"
             )
         if self.dry_run:
             info_lines.append(

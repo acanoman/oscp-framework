@@ -47,13 +47,21 @@ def run(target: str, session, dry_run: bool = False) -> None:
     if session.info.domain:
         cmd += ["--domain", session.info.domain]
 
-    # Credentials: stored in session.info as "smb_user" / "smb_pass" keys
-    # (set by engine if --user/--pass were passed on CLI — Phase 4 addition)
-    smb_user = getattr(session.info, "smb_user", None)
-    smb_pass = getattr(session.info, "smb_pass", None)
-    if smb_user and smb_pass:
-        cmd += ["--user", smb_user, "--pass", smb_pass]
-        log.info("Running authenticated SMB enum as: %s", smb_user)
+    # Credentials from session.info (set by the engine from -u/-p/-H CLI flags).
+    # A single authenticated bind as this one user — never a spray.
+    cred_user = getattr(session.info, "cred_user", "")
+    cred_pass = getattr(session.info, "cred_pass", "")
+    cred_hash = getattr(session.info, "cred_hash", "")
+    if cred_user and (cred_pass or cred_hash):
+        cmd += ["--user", cred_user]
+        if cred_pass:
+            cmd += ["--pass", cred_pass]
+        if cred_hash:
+            cmd += ["--hash", cred_hash]
+        if getattr(session.info, "local_auth", False):
+            cmd += ["--local-auth"]
+        via = "hash (PTH)" if cred_hash and not cred_pass else "password"
+        log.info("Running authenticated SMB enum as %s (via %s)", cred_user, via)
     else:
         log.info("Running null/guest SMB enum (no credentials in session)")
 

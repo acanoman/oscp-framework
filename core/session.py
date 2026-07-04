@@ -275,6 +275,15 @@ class TargetInfo:
     # ntlm_hashes_found: True when any module captures NTLM hashes (responder,
     #   secretsdump, etc.) — triggers Pass-the-Hash templates in the Recommender
     ntlm_hashes_found:  bool             = False
+    # ── Authenticated enumeration credentials ────────────────────────────────
+    # Supplied via CLI (-u/-p/-H/--local-auth). When cred_user is set, every
+    # credential-aware module authenticates ONCE as this single user — no
+    # spraying, no brute force. cred_hash is used for pass-the-hash when the
+    # plaintext password is unknown. Persisted so --resume keeps the creds.
+    cred_user:          str              = ""
+    cred_pass:          str              = ""
+    cred_hash:          str              = ""
+    local_auth:         bool             = False
 
     def add_port(self, port: int, service: str = "", version: str = "",
                  banner: str = "") -> None:
@@ -303,6 +312,10 @@ class TargetInfo:
             "os_version":           self.os_version,
             "is_domain_controller": self.is_domain_controller,
             "ntlm_hashes_found":    self.ntlm_hashes_found,
+            "cred_user":            self.cred_user,
+            "cred_pass":            self.cred_pass,
+            "cred_hash":            self.cred_hash,
+            "local_auth":           self.local_auth,
         }
 
     @classmethod
@@ -322,6 +335,10 @@ class TargetInfo:
         obj.os_version           = data.get("os_version", "")
         obj.is_domain_controller = data.get("is_domain_controller", False)
         obj.ntlm_hashes_found    = data.get("ntlm_hashes_found", False)
+        obj.cred_user            = data.get("cred_user", "")
+        obj.cred_pass            = data.get("cred_pass", "")
+        obj.cred_hash            = data.get("cred_hash", "")
+        obj.local_auth           = data.get("local_auth", False)
         return obj
 
 

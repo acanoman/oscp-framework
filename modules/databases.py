@@ -59,6 +59,23 @@ def run(target: str, session, dry_run: bool = False) -> None:
         "--ports",      ports_csv,
     ]
 
+    if session.info.domain:
+        cmd += ["--domain", session.info.domain]
+
+    # Credentials from session.info → authenticated read-only DB enumeration.
+    cred_user = getattr(session.info, "cred_user", "")
+    cred_pass = getattr(session.info, "cred_pass", "")
+    cred_hash = getattr(session.info, "cred_hash", "")
+    if cred_user and (cred_pass or cred_hash):
+        cmd += ["--user", cred_user]
+        if cred_pass:
+            cmd += ["--pass", cred_pass]
+        if cred_hash:
+            cmd += ["--hash", cred_hash]
+        if getattr(session.info, "local_auth", False):
+            cmd += ["--local-auth"]
+        log.info("Running authenticated DB enum as %s", cred_user)
+
     run_wrapper(cmd, session, label="db_enum.sh", dry_run=dry_run)
 
     if dry_run:

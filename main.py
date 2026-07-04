@@ -62,6 +62,45 @@ Examples:
             "Example: --lhost 10.10.14.5"
         ),
     )
+    # ── Authenticated enumeration ────────────────────────────────────────────
+    # Supplying a valid credential re-runs the framework in AUTHENTICATED mode:
+    # every credential-aware module (SMB, LDAP, MSSQL, WinRM, Kerberos) binds
+    # ONCE as this single user. No password spraying, no brute force — a handful
+    # of logins with a known-good password, so no account-lockout risk.
+    parser.add_argument(
+        "--user", "-u",
+        default="",
+        metavar="USER",
+        help=(
+            "Domain or local username for AUTHENTICATED enumeration. "
+            "Requires --password or --hash. Enables authenticated SMB/LDAP/MSSQL/"
+            "WinRM enum, BloodHound collection, and Kerberoast/AS-REP hash capture. "
+            "Enumeration only — never exploitation, never password spraying."
+        ),
+    )
+    parser.add_argument(
+        "--password", "-p",
+        default="",
+        metavar="PASS",
+        help="Password for --user (plaintext). Use --hash instead for pass-the-hash.",
+    )
+    parser.add_argument(
+        "--hash", "-H",
+        default="",
+        metavar="NTLM",
+        help=(
+            "NTLM hash for --user (pass-the-hash). Format: LM:NT or just NT. "
+            "Alternative to --password when you have a hash but not the plaintext."
+        ),
+    )
+    parser.add_argument(
+        "--local-auth",
+        action="store_true",
+        help=(
+            "Authenticate against the LOCAL account database instead of the domain "
+            "(passes --local-auth to nxc/netexec). Use for standalone hosts or local admin creds."
+        ),
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -77,6 +116,8 @@ Examples:
         "--modules", "-m",
         nargs="+",
         choices=[
+            # Tier 0 — Authenticated credential sweep (needs -u/-p or -u/-H)
+            "creds",
             # Tier 1 — Lightning Fast
             "smb", "ftp", "ldap", "dns", "snmp", "nfs", "services", "network",
             # Tier 2 — Medium
@@ -87,6 +128,7 @@ Examples:
         metavar="MODULE",
         help=(
             "Run specific modules only (default: auto-detect from open ports). "
+            "Tier 0: creds (authenticated sweep) | "
             "Tier 1: smb ftp ldap dns snmp nfs services network | "
             "Tier 2: databases remote mail | "
             "Tier 3: web"
@@ -125,6 +167,18 @@ def main() -> None:
     args = parse_args()
     banner()
 
+    # Credential sanity checks — a username needs a secret, and a secret
+    # without a username is meaningless.
+    if args.user and not (args.password or args.hash):
+        error("--user requires --password or --hash. Aborting.")
+        sys.exit(1)
+    if (args.password or args.hash) and not args.user:
+        error("--password/--hash given without --user. Aborting.")
+        sys.exit(1)
+    if args.password and args.hash:
+        warn("Both --password and --hash supplied — using --password, ignoring --hash.")
+        args.hash = ""
+
     start = time.time()
     engine = Engine(
         target=args.target,
@@ -136,6 +190,10 @@ def main() -> None:
         lhost=args.lhost,
         resume=args.resume,
         quick=args.quick,
+        user=args.user,
+        password=args.password,
+        ntlm_hash=args.hash,
+        local_auth=args.local_auth,
     )
 
     try:

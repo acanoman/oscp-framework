@@ -66,12 +66,22 @@ def run(target: str, session, dry_run: bool = False) -> None:
     if session.info.domain:
         cmd += ["--domain", session.info.domain]
 
-    # Credentials stored by engine (Phase 4 addition)
-    ldap_user = getattr(session.info, "ldap_user", None)
-    ldap_pass = getattr(session.info, "ldap_pass", None)
-    if ldap_user and ldap_pass:
-        cmd += ["--user", ldap_user, "--pass", ldap_pass]
-        log.info("Running authenticated LDAP enum as: %s", ldap_user)
+    # Credentials from session.info (set by the engine from -u/-p/-H CLI flags).
+    # Authenticated LDAP unlocks BloodHound collection and Kerberoast/AS-REP
+    # hash capture inside the wrapper. Single bind — no spraying.
+    cred_user = getattr(session.info, "cred_user", "")
+    cred_pass = getattr(session.info, "cred_pass", "")
+    cred_hash = getattr(session.info, "cred_hash", "")
+    if cred_user and (cred_pass or cred_hash):
+        cmd += ["--user", cred_user]
+        if cred_pass:
+            cmd += ["--pass", cred_pass]
+        if cred_hash:
+            cmd += ["--hash", cred_hash]
+        if getattr(session.info, "local_auth", False):
+            cmd += ["--local-auth"]
+        via = "hash (PTH)" if cred_hash and not cred_pass else "password"
+        log.info("Running authenticated LDAP enum as %s (via %s)", cred_user, via)
     else:
         log.info("Running anonymous LDAP bind (no credentials in session)")
 

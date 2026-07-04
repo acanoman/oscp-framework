@@ -179,6 +179,50 @@ commands inside `notes.md`, making them copy-paste ready without manual editing.
 Passes the domain to LDAP, SMB, DNS, kerbrute, and web modules so they all
 operate with the correct base DN and hostname context.
 
+### Authenticated enumeration (with credentials)
+
+Once you obtain **one valid credential** — from an LDAP `description` field, an
+SNMP process argument, a config file, or handed to you in the exam brief —
+re-run ARGUS in **authenticated mode** to enumerate everything that credential
+unlocks:
+
+```bash
+# Domain credential (password)
+./run.sh --target 10.10.10.5 --domain corp.local -u jdoe -p 'Summer2024!' --lhost 10.10.14.5
+
+# Local account
+./run.sh --target 10.10.10.5 -u administrator -p 'P@ssw0rd' --local-auth
+
+# Pass-the-Hash (NTLM hash instead of password)
+./run.sh --target 10.10.10.5 --domain corp.local -u jdoe -H aad3b435b51404ee:31d6cfe0d16ae931
+```
+
+**Recommended workflow:** run once anonymously → find a credential → re-run with
+`-u/-p`. Credentials are stored in `session.json`, so `--resume` keeps them.
+
+What authenticated mode adds on top of the anonymous run:
+
+| Service | Authenticated action (read-only enumeration) |
+| ------- | -------------------------------------------- |
+| **Credential sweep** (Tier 0, runs first) | Checks which protocols the cred can log in to — reports `Pwn3d!` where code execution is possible |
+| **SMB** | Authenticated `smbmap` / `nxc` shares, users, groups, logged-on sessions, `enum4linux-ng` |
+| **LDAP** | Authenticated dump + **BloodHound** collection (`.zip` ready to import) |
+| **Kerberos** | **Kerberoast** and **AS-REP roast** hash *collection* → `ldap/kerberoast_hashes.txt`, `ldap/asrep_hashes.txt` |
+| **MSSQL / MySQL / PostgreSQL** | List databases, users, roles (no writes, no `xp_cmdshell`) |
+| **WinRM** | `nxc winrm` access check — confirms login / `Pwn3d!` without opening a shell |
+
+> **Account-lockout safety.** With a supplied credential ARGUS makes a **single
+> authenticated bind per protocol as that one user** — it never sprays a password
+> across a user list and never brute-forces. That is a handful of logins with a
+> password you already know is valid, so there is no lockout risk. If any protocol
+> reports `STATUS_ACCOUNT_LOCKED_OUT`, the sweep halts immediately.
+>
+> **Still enumeration, never exploitation.** Kerberoast/AS-REP *ticket requests*
+> are not logon attempts (they cannot lock accounts) and cracking the captured
+> hashes with hashcat stays a **manual** step. Getting a shell (`evil-winrm`,
+> `psexec`, `xp_cmdshell`) is never automated — those remain manual hints so the
+> tool stays within OSCP rules.
+
 ### Resume an interrupted session
 
 ```bash
@@ -228,9 +272,13 @@ then run a second full pass (without `--quick`) on the most promising targets.
 | ---- | ----- | ------- | ----------- |
 | `--target` | `-t` | *(required)* | Target IP address |
 | `--domain` | `-d` | `""` | Target domain (e.g. `corp.local`). Passed to LDAP, DNS, SMB, Kerberos, and web modules |
+| `--user` | `-u` | `""` | Username for **authenticated** enumeration. Requires `--password` or `--hash`. See [Authenticated enumeration](#authenticated-enumeration-with-credentials) |
+| `--password` | `-p` | `""` | Password for `--user` (plaintext) |
+| `--hash` | `-H` | `""` | NTLM hash for `--user` (pass-the-hash). Format `LM:NT` or just `NT` |
+| `--local-auth` | | `false` | Authenticate against the host's LOCAL account DB instead of the domain |
 | `--lhost` | | `""` | Your attacker/VPN IP. Pre-fills all `<LHOST>` placeholders in `notes.md` |
-| `--resume` | | `false` | Resume from `session.json`. Skips Nmap and completed modules |
-| `--modules` | `-m` | *(auto)* | Force specific modules. Choices: `smb ftp ldap dns snmp nfs services network databases remote mail web` |
+| `--resume` | | `false` | Resume from `session.json`. Skips Nmap and completed modules. **Persists supplied credentials** |
+| `--modules` | `-m` | *(auto)* | Force specific modules. Choices: `creds smb ftp ldap dns snmp nfs services network databases remote mail web` |
 | `--quick` | `-q` | `false` | Quick mode — abort each module after 120 s and move on. Ideal for OSCP first-pass recon |
 | `--dry-run` | | `false` | Print commands without executing any |
 | `--output-dir` | | `output/targets` | Base directory for scan output |

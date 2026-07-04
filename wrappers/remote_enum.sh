@@ -34,13 +34,18 @@ has_port() { echo ",$PORTS," | grep -q ",$1,"; }
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-TARGET=""; OUTPUT_DIR=""; PORTS=""
+TARGET=""; OUTPUT_DIR=""; PORTS=""; RUSER=""; RPASS=""; RHASH=""; DOMAIN=""; LOCAL_AUTH=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --target)     TARGET="$2";     shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --ports)      PORTS="$2";      shift 2 ;;
+        --user)       RUSER="$2";      shift 2 ;;
+        --pass)       RPASS="$2";      shift 2 ;;
+        --hash)       RHASH="$2";      shift 2 ;;
+        --domain)     DOMAIN="$2";     shift 2 ;;
+        --local-auth) LOCAL_AUTH=1;    shift ;;
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -49,6 +54,12 @@ if [[ -z "$TARGET" || -z "$OUTPUT_DIR" || -z "$PORTS" ]]; then
     err "Usage: $0 --target <IP> --output-dir <DIR> --ports <CSV>"
     exit 1
 fi
+
+# Preferred credential-check tool for the authenticated WinRM probe.
+NXC=""
+command -v nxc          &>/dev/null && NXC="nxc"
+command -v netexec      &>/dev/null && [[ -z "$NXC" ]] && NXC="netexec"
+command -v crackmapexec &>/dev/null && [[ -z "$NXC" ]] && NXC="crackmapexec"
 
 REMOTE_DIR="${OUTPUT_DIR}/remote"
 mkdir -p "$REMOTE_DIR"
@@ -168,6 +179,30 @@ if echo ",$PORTS," | grep -qP ',(5985|5986),'; then
     # Check if Kerberos / NTLM auth is advertised
     if grep -qi "Negotiate\|NTLM\|Kerberos" "$WINRM_OUT" 2>/dev/null; then
         ok "WinRM auth methods detected — check ${WINRM_OUT}"
+    fi
+
+    # ------------------------------------------------------------------
+    # Authenticated WinRM ACCESS check (only with credentials).
+    # Confirms whether the supplied credential can log in over WinRM —
+    # nxc reports "Pwn3d!" when the account can execute. This is an access
+    # CHECK, not a shell: we do NOT run evil-winrm (that is the foothold /
+    # exploitation step and stays a manual hint below). One attempt only.
+    # ------------------------------------------------------------------
+    if [[ -n "$RUSER" && ( -n "$RPASS" || -n "$RHASH" ) && -n "$NXC" ]]; then
+        info "WinRM authenticated access check as ${RUSER} (single attempt, no lockout risk)"
+        WINRM_CRED=( -u "$RUSER" )
+        if [[ -n "$RPASS" ]]; then WINRM_CRED+=( -p "$RPASS" ); else WINRM_CRED+=( -H "$RHASH" ); fi
+        [[ "$LOCAL_AUTH" == "1" ]] && WINRM_CRED+=( --local-auth )
+        [[ "$LOCAL_AUTH" != "1" && -n "$DOMAIN" ]] && WINRM_CRED+=( -d "$DOMAIN" )
+
+        cmd "$NXC winrm $TARGET ${WINRM_CRED[*]}"
+        $NXC winrm "$TARGET" "${WINRM_CRED[@]}" \
+            2>&1 | tee "${REMOTE_DIR}/nxc_winrm_auth.txt" || true
+        if grep -qi 'Pwn3d' "${REMOTE_DIR}/nxc_winrm_auth.txt" 2>/dev/null; then
+            ok "WinRM: ${RUSER} CAN execute — evil-winrm shell is available (see manual hint)"
+        elif grep -qi '\[+\]' "${REMOTE_DIR}/nxc_winrm_auth.txt" 2>/dev/null; then
+            ok "WinRM: ${RUSER} authenticated (login OK; may not be in Remote Management Users)"
+        fi
     fi
 
     hint "WinRM shell (MANUAL — requires credentials):
