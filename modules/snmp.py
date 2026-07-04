@@ -100,6 +100,10 @@ def _add_manual_hints(session, open_snmp: set) -> None:
             f"snmpwalk -v2c -c public {ip} 1.3.6.1.2.1.25.4.2.1.2"
         )
         session.add_note(
+            f"💡 [MANUAL] SNMP process cmdline args (credential leaks!): "
+            f"snmpwalk -v2c -c public {ip} 1.3.6.1.2.1.25.4.2.1.5"
+        )
+        session.add_note(
             f"💡 [MANUAL] SNMP nmap script: "
             f"nmap -p 161,162 -sU --script snmp-brute,snmp-info,snmp-sysdescr {ip}"
         )
@@ -111,40 +115,52 @@ def _add_manual_hints(session, open_snmp: set) -> None:
 
 def _parse_snmp(session, log) -> None:
     snmp_dir = session.target_dir / "snmp"
-    snmp_f   = snmp_dir / "snmp_nmap.txt"
-    if not snmp_f.exists():
-        snmp_f = session.target_dir / "services" / "snmp_nmap.txt"
-    if not snmp_f.exists():
+    if not snmp_dir.exists():
         return
 
-    content = snmp_f.read_text(errors="ignore")
-
-    # Community string confirmed
-    for cs in _COMMUNITY_STRINGS:
-        if re.search(rf"community.*{cs}|{cs}.*community", content, re.IGNORECASE):
-            log.warning("SNMP: community string '%s' appears valid", cs)
+    # -----------------------------------------------------------------------
+    # 1) Discovered community string (from onesixtyone: "<IP> [community] ...")
+    # -----------------------------------------------------------------------
+    comm_f = snmp_dir / "communities.txt"
+    if comm_f.exists():
+        for m in re.findall(r"\[([^\]]+)\]", comm_f.read_text(errors="ignore")):
+            log.warning("SNMP: community string '%s' accepted", m)
             session.add_note(
-                f"🚨 SNMP FINDING: Community string '{cs}' accepted — {snmp_f}"
+                f"🚨 SNMP FINDING: Community string '{m}' accepted — {comm_f}"
             )
 
-    # System description (reveals OS/version)
-    sysdescr = re.search(r"SNMPv2-MIB::sysDescr\.0\s*=\s*(.+)", content)
-    if sysdescr:
-        log.info("SNMP sysDescr: %s", sysdescr.group(1).strip())
-        session.add_note(f"SNMP sysDescr: {sysdescr.group(1).strip()}")
+    # -----------------------------------------------------------------------
+    # 2) Credentials leaked in process command-line arguments (top priority)
+    #    Written by the wrapper's grep over the hrSWRunParameters walk.
+    # -----------------------------------------------------------------------
+    cred_f = snmp_dir / "snmp_cred_hits.txt"
+    if cred_f.exists() and cred_f.stat().st_size > 0:
+        for line in cred_f.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if line:
+                log.warning("SNMP possible credential in cmdline: %s", line)
+                session.add_note(
+                    f"🚨 SNMP CREDENTIAL LEAK (process args): {line} — {cred_f}"
+                )
 
-    # Hostname revealed via SNMP
-    sysname = re.search(r"SNMPv2-MIB::sysName\.0\s*=\s*(\S+)", content)
-    if sysname:
-        hostname = sysname.group(1).strip()
-        log.info("SNMP hostname: %s", hostname)
-        session.add_note(f"SNMP hostname disclosed: {hostname}")
-        if hostname not in session.info.domains_found:
-            session.info.domains_found.append(hostname)
+    # -----------------------------------------------------------------------
+    # 3) System info from the full walk (OS/version + hostname)
+    # -----------------------------------------------------------------------
+    walk_f = snmp_dir / "snmpwalk_full.txt"
+    if walk_f.exists():
+        content = walk_f.read_text(errors="ignore")
 
-    # Windows users from OID 1.3.6.1.4.1.77.1.2.25
-    users = re.findall(r"hrSWRunName|iso\.3\.6.*STRING: \"([^\"]+)\"", content)
-    if users:
-        log.info("SNMP potential process/user names: %s", users[:10])
+        sysdescr = re.search(r"SNMPv2-MIB::sysDescr\.0\s*=\s*(.+)", content)
+        if sysdescr:
+            log.info("SNMP sysDescr: %s", sysdescr.group(1).strip())
+            session.add_note(f"SNMP sysDescr: {sysdescr.group(1).strip()}")
+
+        sysname = re.search(r"SNMPv2-MIB::sysName\.0\s*=\s*(\S+)", content)
+        if sysname:
+            hostname = sysname.group(1).strip()
+            log.info("SNMP hostname: %s", hostname)
+            session.add_note(f"SNMP hostname disclosed: {hostname}")
+            if hostname not in session.info.domains_found:
+                session.info.domains_found.append(hostname)
 
 

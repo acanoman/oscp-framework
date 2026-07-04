@@ -664,33 +664,68 @@ if has_udp_port 161; then
         warn "onesixtyone not found or no wordlist — trying snmpwalk with 'public' directly."
     fi
 
-    # Full SNMP walk with public community
+    # -----------------------------------------------------------------------
+    # Pick the community string to walk with.
+    # onesixtyone prints:  <IP> [community] Hardware: ...
+    # Use the FIRST discovered community; fall back to 'public'. This fixes the
+    # case where the box uses a non-public community (private/custom) — we now
+    # walk with what actually works instead of assuming public.
+    # -----------------------------------------------------------------------
+    SNMP_COMM="public"
+    if [[ -f "${SNMP_DIR}/communities.txt" ]]; then
+        DISCOVERED=$(grep -oP '\[\K[^\]]+' "${SNMP_DIR}/communities.txt" 2>/dev/null | head -n1)
+        if [[ -n "$DISCOVERED" ]]; then
+            SNMP_COMM="$DISCOVERED"
+            ok "SNMP community string discovered: '${SNMP_COMM}' — using it for all walks"
+        fi
+    fi
+
+    # Full SNMP walk with the discovered/default community
     if command -v snmpwalk &>/dev/null; then
-        cmd "snmpwalk -v2c -c public $TARGET"
-        snmpwalk -v2c -c public "$TARGET" \
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" \
             2>&1 | tee "${SNMP_DIR}/snmpwalk_full.txt" || true
 
         # Targeted OID queries for high-value data
-        cmd "snmpwalk -v2c -c public $TARGET 1.3.6.1.2.1.25.4.2.1.2 (running processes)"
-        snmpwalk -v2c -c public "$TARGET" 1.3.6.1.2.1.25.4.2.1.2 \
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.2.1.25.4.2.1.2 (running processes)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.2.1.25.4.2.1.2 \
             2>&1 | tee "${SNMP_DIR}/snmp_processes.txt" || true
 
-        cmd "snmpwalk -v2c -c public $TARGET 1.3.6.1.2.1.25.6.3.1.2 (installed software)"
-        snmpwalk -v2c -c public "$TARGET" 1.3.6.1.2.1.25.6.3.1.2 \
+        # Process command-line PARAMETERS — the #1 SNMP credential leak.
+        # Services started with creds as args (mysql -u root -pRoot123,
+        # net use ... /user:pass) expose them here. Read-only WALK, OSCP-safe.
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.2.1.25.4.2.1.5 (process cmdline args)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.2.1.25.4.2.1.5 \
+            2>&1 | tee "${SNMP_DIR}/snmp_cmdline.txt" || true
+
+        # Surface likely credentials from process arguments into a dedicated
+        # file so the parser (and the operator) can spot them immediately.
+        if [[ -s "${SNMP_DIR}/snmp_cmdline.txt" ]]; then
+            CRED_HITS=$(grep -iP -- \
+                '(-p[= ]?\S|-pw\b|pass(word|wd)?[=: ]|pwd[=: ]|/user:|-u\s+\S+\s+-p|token|secret)' \
+                "${SNMP_DIR}/snmp_cmdline.txt" 2>/dev/null | grep -v '^[[:space:]]*$' || true)
+            if [[ -n "$CRED_HITS" ]]; then
+                warn "SNMP: possible CREDENTIALS in process cmdline args — review below:"
+                echo "$CRED_HITS" | tee "${SNMP_DIR}/snmp_cred_hits.txt"
+            fi
+        fi
+
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.2.1.25.6.3.1.2 (installed software)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.2.1.25.6.3.1.2 \
             2>&1 | tee "${SNMP_DIR}/snmp_software.txt" || true
 
-        cmd "snmpwalk -v2c -c public $TARGET 1.3.6.1.4.1.77.1.2.25 (Windows users)"
-        snmpwalk -v2c -c public "$TARGET" 1.3.6.1.4.1.77.1.2.25 \
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.4.1.77.1.2.25 (Windows users)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.4.1.77.1.2.25 \
             2>&1 | tee "${SNMP_DIR}/snmp_users.txt" || true
 
         # Network interfaces — critical for pivot/dual-homed host discovery
-        cmd "snmpwalk -v2c -c public $TARGET 1.3.6.1.2.1.2.2.1.2 (network interfaces)"
-        snmpwalk -v2c -c public "$TARGET" 1.3.6.1.2.1.2.2.1.2 \
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.2.1.2.2.1.2 (network interfaces)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.2.1.2.2.1.2 \
             2>&1 | tee "${SNMP_DIR}/snmp_interfaces.txt" || true
 
         # Companion OID: interface IP addresses (pairs with interface names above)
-        cmd "snmpwalk -v2c -c public $TARGET 1.3.6.1.2.1.4.20.1.1 (interface IP addresses)"
-        snmpwalk -v2c -c public "$TARGET" 1.3.6.1.2.1.4.20.1.1 \
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET 1.3.6.1.2.1.4.20.1.1 (interface IP addresses)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" 1.3.6.1.2.1.4.20.1.1 \
             2>&1 | tee "${SNMP_DIR}/snmp_ip_addrs.txt" || true
 
         # Flag dual-homed (pivot) hosts
@@ -704,8 +739,8 @@ if has_udp_port 161; then
     fi
 
     if command -v snmp-check &>/dev/null; then
-        cmd "snmp-check $TARGET"
-        snmp-check "$TARGET" 2>&1 | tee "${SNMP_DIR}/snmp_check.txt" || true
+        cmd "snmp-check -c $SNMP_COMM $TARGET"
+        snmp-check -c "$SNMP_COMM" "$TARGET" 2>&1 | tee "${SNMP_DIR}/snmp_check.txt" || true
     fi
     echo ""
 fi
