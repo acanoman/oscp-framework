@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oscp-framework"
+version = "1.0.0"
+description = "OSCP Enumeration Framework — assisted recon, never autopwn."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "rich>=13.0.0",
+    "pyfiglet>=0.8.0",
+]
+
+# Installs an `oscp-framework` command on your PATH that runs main.main().
+# Use an EDITABLE install (pip install -e .) so the bash wrappers under
+# wrappers/ are still found — they are resolved relative to the source tree,
+# not copied into site-packages.
+[project.scripts]
+oscp-framework = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["core", "modules"]
