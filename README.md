@@ -152,6 +152,41 @@ python main.py --target <IP> --lhost <LHOST>
 All tool checks are non-fatal — missing optional tools are reported as
 warnings, not errors.
 
+### Install with pip (run `oscp-framework` from anywhere)
+
+If you prefer a command on your `PATH` instead of `./run.sh`, install the
+package. **Use an editable install (`-e`)** so the bash wrappers under
+`wrappers/` are still found — they are resolved relative to the source tree,
+not copied into `site-packages`, so a plain `pip install .` would break them.
+
+```bash
+# Recommended on Kali (isolated, no PEP 668 issues) — pipx
+sudo apt install -y pipx
+cd oscp-framework
+pipx install -e .
+pipx ensurepath          # adds ~/.local/bin to PATH (open a new shell after)
+
+# Then, from ANY directory:
+oscp-framework --target <IP> --lhost <LHOST>
+```
+
+Alternatives:
+
+```bash
+# A) Project virtualenv
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+oscp-framework --target <IP> --lhost <LHOST>
+
+# B) System pip (Kali blocks global pip via PEP 668)
+pip install -e . --break-system-packages --user
+```
+
+> **Keep the repo folder in place after installing.** An editable install
+> points at this directory; if you move or delete it, reinstall. External
+> tools (nmap, snmpwalk, feroxbuster…) are called as system binaries and are
+> unaffected by pipx/venv.
+
 ---
 
 ## Usage
