@@ -647,34 +647,9 @@ fi
 echo ""
 
 # ===========================================================================
-# 6 — Nikto (safe web scan)
-# Runs BEFORE feroxbuster — fast enough that Ctrl+C on the deep scan won't
-# lose nikto results.
-# ===========================================================================
-info "[6/10] Nikto — web vulnerability scan (max 15 min)"
-NIKTO_OUT="${WEB_DIR}/nikto${SUFFIX}.txt"
-NIKTO_SSL=""
-[[ "$PROTO" == "https" ]] && NIKTO_SSL="-ssl"
-
-if command -v nikto &>/dev/null; then
-    cmd "nikto -h $TARGET -port $PORT $NIKTO_SSL -ask no -maxtime 900 -timeout 10"
-    nikto -h "$TARGET" -port "$PORT" $NIKTO_SSL \
-        -ask no -maxtime 900 -timeout 10 \
-        -Format txt -output "$NIKTO_OUT" 2>&1 \
-        | grep -vE '(OSVDB-0:|013587|Suggested security header|Your Nikto installation is out of date|No web server found|use the -ssl)' \
-        | tee "${NIKTO_OUT}.log" || true
-    # Nikto sometimes appends .txt.txt
-    [[ -f "${NIKTO_OUT}.txt" ]] && mv "${NIKTO_OUT}.txt" "$NIKTO_OUT" 2>/dev/null || true
-    ok "Nikto done → ${WHITE}${NIKTO_OUT}${NC}"
-else
-    skip "nikto"
-    touch "$NIKTO_OUT"
-fi
-echo ""
-
-# ===========================================================================
 # 7 — Feroxbuster — recursive deep scan (medium wordlist)
-# Placed AFTER CGI sniper and Nikto — safe to Ctrl+C without losing results.
+# Nikto is deliberately deferred to the very end (step 9.9) — it is the
+# slowest, lowest-priority tool, so directory/vhost/TLS enumeration runs first.
 # ===========================================================================
 info "[7/10] Feroxbuster — recursive deep scan (medium wordlist)"
 
@@ -917,6 +892,34 @@ if [[ "$PROTO" == "https" ]]; then
     fi
 else
     info "[9/10] HTTP port — sslscan skipped (HTTPS only)"
+fi
+echo ""
+
+# ===========================================================================
+# 9.9 — Nikto (safe web scan) — RUNS LAST
+# Deliberately the final automated tool: it is the slowest and lowest-priority
+# scan, so everything else (dirs, CGI, vhost, TLS) has already completed and
+# is safe to Ctrl+C here without losing anything.  Hard-capped at 3 minutes
+# (-maxtime 180) so it never hangs the whole run.
+# ===========================================================================
+info "[9.9/10] Nikto — web vulnerability scan (max 3 min, runs last)"
+NIKTO_OUT="${WEB_DIR}/nikto${SUFFIX}.txt"
+NIKTO_SSL=""
+[[ "$PROTO" == "https" ]] && NIKTO_SSL="-ssl"
+
+if command -v nikto &>/dev/null; then
+    cmd "nikto -h $TARGET -port $PORT $NIKTO_SSL -ask no -maxtime 180 -timeout 10"
+    nikto -h "$TARGET" -port "$PORT" $NIKTO_SSL \
+        -ask no -maxtime 180 -timeout 10 \
+        -Format txt -output "$NIKTO_OUT" 2>&1 \
+        | grep -vE '(OSVDB-0:|013587|Suggested security header|Your Nikto installation is out of date|No web server found|use the -ssl)' \
+        | tee "${NIKTO_OUT}.log" || true
+    # Nikto sometimes appends .txt.txt
+    [[ -f "${NIKTO_OUT}.txt" ]] && mv "${NIKTO_OUT}.txt" "$NIKTO_OUT" 2>/dev/null || true
+    ok "Nikto done → ${WHITE}${NIKTO_OUT}${NC}"
+else
+    skip "nikto"
+    touch "$NIKTO_OUT"
 fi
 echo ""
 
