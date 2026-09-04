@@ -1284,6 +1284,19 @@ class Engine:
 
             low = note.lower()
 
+            # Honor explicit severity emitted by module parsers so a finding
+            # they already judged severe is never downgraded to green by the
+            # keyword heuristics below. Parsers prefix such notes with a
+            # leading 🚨 or a "CRITICAL:" / "HIGH:" word (e.g. plaintext
+            # passwords in LDAP description fields, SNMP credential leaks).
+            explicit = note.lstrip("🚨⚠🔴!* ").lower()
+            if note.lstrip().startswith(("🚨", "🔴")) or explicit.startswith("critical"):
+                findings.append(("critical", note))
+                continue
+            if explicit.startswith("high"):
+                findings.append(("high", note))
+                continue
+
             # Skip noise: pure scan-status lines and non-finding notes
             skip_kw = ("nmap found ports", "os guess via ttl", "module", "phase")
             if any(sk in low for sk in skip_kw):

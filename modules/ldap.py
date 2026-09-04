@@ -292,32 +292,89 @@ def _parse_description_fields(ldap_dir: Path, session, log) -> None:
     if not desc_file.exists() or desc_file.stat().st_size == 0:
         return
 
-    content = desc_file.read_text(errors="ignore")
-    # Count accounts with descriptions
-    desc_count = len(re.findall(r'^description:', content, re.MULTILINE))
-    if desc_count == 0:
+    raw = desc_file.read_text(errors="ignore")
+
+    # -----------------------------------------------------------------------
+    # Unwrap LDIF continuation lines. ldapsearch wraps long values at ~76
+    # cols; continuation lines begin with a single leading space. Without
+    # this, a password split across two lines (very common) is missed.
+    # -----------------------------------------------------------------------
+    unwrapped: list = []
+    for line in raw.splitlines():
+        if line.startswith(" ") and unwrapped:
+            unwrapped[-1] += line[1:]
+        else:
+            unwrapped.append(line)
+
+    # -----------------------------------------------------------------------
+    # Walk entries, pairing each description with the account it belongs to.
+    # -----------------------------------------------------------------------
+    entries: list = []            # (account, description)
+    cur_acct = ""
+    for line in unwrapped:
+        if line.startswith("sAMAccountName:"):
+            cur_acct = line.split(":", 1)[-1].strip()
+        elif line.startswith("cn:") and not cur_acct:
+            cur_acct = line.split(":", 1)[-1].strip()
+        elif line.startswith("description:"):
+            entries.append((cur_acct or "?", line.split(":", 1)[-1].strip()))
+        elif line.strip() == "":
+            cur_acct = ""            # blank line separates LDIF entries
+
+    if not entries:
         return
 
     log.warning(
-        "LDAP: %d account(s) have description fields — review for embedded passwords",
-        desc_count,
+        "LDAP: %d account(s)/object(s) have description fields — reviewing for passwords",
+        len(entries),
     )
     session.add_note(
-        f"HIGH: {desc_count} LDAP account(s) have description fields "
-        f"— check for embedded passwords: "
-        f"grep -A1 'sAMAccountName:' {desc_file} | grep -v '^--$'"
+        f"HIGH: {len(entries)} LDAP description field(s) present — full list in {desc_file}"
     )
 
-    # Extract and flag any description that looks like it might be a password
-    # (contains uppercase + lowercase + digits or special chars — classic password pattern)
-    _PASS_LIKE = re.compile(r'(?=[^a-z]*[a-z])(?=[^A-Z]*[A-Z])(?=\D*\d).{6,}')
-    for line in content.splitlines():
-        if line.startswith("description:"):
-            value = line.split(":", 1)[-1].strip()
-            if _PASS_LIKE.match(value):
-                log.warning("LDAP description may contain a password: %s", value[:60])
+    # Boilerplate AD group/account descriptions that are never credentials.
+    _BOILERPLATE = (
+        "built-in account", "all workstations", "all domain", "members of this",
+        "members in this", "dns administrators", "dns clients", "servers in this",
+        "group policy for the domain", "read-only domain controllers",
+        "additional protections", "may be cloned", "see http",
+    )
+    # A password-like token: >=6 chars mixing upper, lower and a digit.
+    _TOKEN = re.compile(r'[A-Za-z0-9!@#$%^&*._+=?-]{6,}')
+
+    def _looks_secret(tok: str) -> bool:
+        return (any(c.islower() for c in tok)
+                and any(c.isupper() for c in tok)
+                and any(c.isdigit() for c in tok))
+
+    for acct, desc in entries:
+        low = desc.lower()
+        if not desc or "http://" in low or "https://" in low:
+            continue
+        if any(b in low for b in _BOILERPLATE):
+            continue
+
+        # Pull the most likely password token out of the description so it is
+        # copy-paste ready, then flag the whole thing as CRITICAL (red panel).
+        secret = next((t for t in _TOKEN.findall(desc) if _looks_secret(t)), "")
+        mentions_pw = any(k in low for k in ("pass", "pwd", "cred", "secret"))
+
+        if secret or mentions_pw:
+            log.warning("LDAP possible password for %s: %s", acct, desc[:80])
+            if secret:
                 session.add_note(
-                    f"CRITICAL: LDAP description field looks like a password: '{value[:80]}'"
+                    f"🚨 CRITICAL: possible password for LDAP user '{acct}': "
+                    f"{secret}  (description: \"{desc[:100]}\")"
+                )
+                # Make it copy-paste ready for credential spraying.
+                session.add_manual_command(
+                    f"crackmapexec smb {session.info.ip} -u '{acct}' -p '{secret}'",
+                    context=f"Test password found in LDAP description of {acct}",
+                )
+            else:
+                session.add_note(
+                    f"🚨 CRITICAL: LDAP description of '{acct}' mentions a "
+                    f"credential — review: \"{desc[:100]}\""
                 )
 
 
