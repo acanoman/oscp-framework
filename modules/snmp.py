@@ -104,6 +104,14 @@ def _add_manual_hints(session, open_snmp: set) -> None:
             f"snmpwalk -v2c -c public {ip} 1.3.6.1.2.1.25.4.2.1.5"
         )
         session.add_note(
+            f"💡 [MANUAL] NET-SNMP extend scripts (RCE/creds on Linux): "
+            f"snmpwalk -v2c -c public {ip} NET-SNMP-EXTEND-MIB::nsExtendObjects"
+        )
+        session.add_note(
+            f"💡 [MANUAL] SNMPv1 fallback (if v2c refused): "
+            f"snmpwalk -v1 -c public {ip}"
+        )
+        session.add_note(
             f"💡 [MANUAL] SNMP nmap script: "
             f"nmap -p 161,162 -sU --script snmp-brute,snmp-info,snmp-sysdescr {ip}"
         )
@@ -162,5 +170,19 @@ def _parse_snmp(session, log) -> None:
             session.add_note(f"SNMP hostname disclosed: {hostname}")
             if hostname not in session.info.domains_found:
                 session.info.domains_found.append(hostname)
+
+    # -----------------------------------------------------------------------
+    # 4) NET-SNMP "extend" objects — custom scripts/commands wired to OIDs.
+    #    High-value on Linux: output of root-run commands, leaked creds, RCE.
+    # -----------------------------------------------------------------------
+    ext_f = snmp_dir / "snmp_extend.txt"
+    if ext_f.exists() and ext_f.stat().st_size > 0:
+        content = ext_f.read_text(errors="ignore")
+        if re.search(r"nsExtend|8072\.1\.3", content):
+            log.warning("SNMP: NET-SNMP extend objects present — review %s", ext_f)
+            session.add_note(
+                f"🚨 SNMP FINDING: NET-SNMP 'extend' objects exposed "
+                f"(custom scripts/commands — check for creds/RCE) — {ext_f}"
+            )
 
 

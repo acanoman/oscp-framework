@@ -40,6 +40,21 @@ _SERVICE_PORTS = {
     5986,  # WinRM HTTPS
     6379,  # Redis
     27017, # MongoDB
+    # --- rare / high-value ports with a dedicated block in services_enum.sh ---
+    79,    # Finger
+    512,   # rexec
+    513,   # rlogin
+    514,   # rsh
+    1521,  # Oracle TNS Listener
+    4369,  # Erlang Port Mapper (epmd)
+    5900,  # VNC
+    5901,  # VNC :1
+    5984,  # CouchDB
+    6000,  # X11
+    8009,  # AJP (Tomcat / Ghostcat)
+    9200,  # Elasticsearch
+    11211, # Memcached
+    # (623/UDP IPMI is handled via the UDP port list, not here)
 }
 
 # Service-name substrings that identify a Java RMI endpoint on any port
@@ -68,14 +83,23 @@ def run(target: str, session, dry_run: bool = False) -> None:
     if rmi_ports:
         log.info("RMI ports detected by service name: %s", rmi_ports)
 
-    # Collect relevant TCP ports — union of fixed service ports and any
-    # dynamically-detected RMI ports (so high-port RMI reaches the wrapper).
-    tcp_ports = (session.info.open_ports & _SERVICE_PORTS) | set(rmi_ports)
+    # Pass ALL open TCP ports to the wrapper — not just the dedicated-block
+    # whitelist. Each dedicated block is guarded by has_port, so extra ports
+    # are harmless; every rare port without a dedicated block then falls
+    # through to the wrapper's nmap -sV -sC + banner fallback. This is what
+    # gives the framework long-tail "rare port" coverage (Elasticsearch,
+    # CouchDB, Memcached, AJP, Oracle, epmd, VNC, X11, r-services, …).
+    tcp_ports = set(session.info.open_ports) | set(rmi_ports)
     if not tcp_ports:
-        log.info("No service-specific ports open — skipping services module.")
+        log.info("No open TCP ports — skipping services module.")
         return
 
-    log.info("Service ports to enumerate: %s", sorted(tcp_ports))
+    # For the log, flag which open ports have a dedicated block vs. fallback.
+    dedicated = sorted(tcp_ports & _SERVICE_PORTS)
+    fallback  = sorted(tcp_ports - _SERVICE_PORTS)
+    log.info("Service ports (dedicated blocks): %s", dedicated)
+    if fallback:
+        log.info("Service ports (nmap/banner fallback): %s", fallback)
 
     script = WRAPPERS_DIR / "services_enum.sh"
     if not script.exists():
@@ -124,6 +148,7 @@ def run(target: str, session, dry_run: bool = False) -> None:
     _parse_databases(session, log)
     _parse_telnet(session, log)
     _parse_msrpc(session, log)
+    _parse_rare_services(session, log)
     _record_version_notes(session, log)
 
     log.info("Services module complete.")
@@ -410,6 +435,51 @@ def _parse_msrpc(session, log) -> None:
         endpoints = re.findall(r"uuid\s+([\w-]+)", nmap_content, re.IGNORECASE)
         if endpoints:
             log.info("MSRPC: %d RPC UUIDs discovered via Nmap", len(endpoints))
+
+
+def _parse_rare_services(session, log) -> None:
+    """Surface high-value findings from the rare-port enumeration blocks."""
+    td = session.target_dir
+
+    # Elasticsearch — unauthenticated cluster (indices readable) + version
+    es_root = td / "elasticsearch" / "root.json"
+    if es_root.exists():
+        content = es_root.read_text(errors="ignore")
+        ver = re.search(r'"number"\s*:\s*"([0-9.]+)"', content)
+        if ver:
+            log.info("Elasticsearch version: %s", ver.group(1))
+            session.add_note(f"Elasticsearch {ver.group(1)} on 9200 — searchsploit elasticsearch {ver.group(1)}")
+        idx = td / "elasticsearch" / "_cat_indices_v.txt"
+        if idx.exists() and idx.stat().st_size > 0 and "security_exception" not in idx.read_text(errors="ignore"):
+            log.warning("Elasticsearch UNAUTHENTICATED on %s", session.info.ip)
+            session.add_note(f"🚨 Elasticsearch UNAUTHENTICATED (9200) — indices readable, review {idx.parent}/data_*.json")
+
+    # CouchDB — _users database readable (password hashes)
+    cdb_users = td / "couchdb" / "_users__all_docs_include_docs_true.json"
+    if cdb_users.exists() and re.search(r"derived_key|password_sha|salt", cdb_users.read_text(errors="ignore")):
+        log.warning("CouchDB _users hashes exposed on %s", session.info.ip)
+        session.add_note(f"🚨 CouchDB _users DB readable (5984) — password hashes exposed, {cdb_users}")
+
+    # VNC — authentication set to none
+    vnc_dir = td / "vnc"
+    if vnc_dir.exists():
+        for f in vnc_dir.glob("vnc_*_nmap.txt"):
+            if re.search(r"auth.*none|No authentication|none.*supported", f.read_text(errors="ignore"), re.IGNORECASE):
+                log.warning("VNC no-auth on %s", session.info.ip)
+                session.add_note(f"🚨 VNC authentication NONE — connect directly with vncviewer, {f}")
+                break
+
+    # X11 — open access
+    x11 = td / "x11" / "x11_nmap.txt"
+    if x11.exists() and re.search(r"access is granted|is open", x11.read_text(errors="ignore"), re.IGNORECASE):
+        log.warning("X11 open access on %s", session.info.ip)
+        session.add_note(f"🚨 X11 open access (6000) — screen/keystroke capture possible, {x11}")
+
+    # IPMI — Cipher Zero auth bypass
+    ipmi = td / "ipmi" / "ipmi_nmap.txt"
+    if ipmi.exists() and re.search(r"cipher.*zero.*enabled|VULNERABLE", ipmi.read_text(errors="ignore"), re.IGNORECASE):
+        log.warning("IPMI Cipher Zero on %s", session.info.ip)
+        session.add_note(f"🚨 IPMI Cipher Zero (623/udp) — auth bypass + hash dump, {ipmi}")
 
 
 def _record_version_notes(session, log) -> None:

